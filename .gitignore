@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+*.user
+*.suo
+*.vs/
+.vs/
+
+# NuGet
+*.nupkg
+*.snupkg
+
+# IDE
+.idea/
+*.sln.DotSettings.user
+.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+*.trx
