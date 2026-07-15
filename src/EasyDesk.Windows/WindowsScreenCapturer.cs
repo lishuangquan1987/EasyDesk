@@ -105,7 +105,7 @@ namespace EasyDesk.Windows
                                 hdcMem, hBitmap, 0, (uint)height,
                                 pixelBuffer, ref bmi, Win32Constants.DIB_RGB_COLORS);
 
-                            if (result == 0 || result == -1 /*ERROR*/)
+                            if (result == 0)
                             {
                                 var error = Marshal.GetLastWin32Error();
                                 throw new InvalidOperationException(
@@ -160,11 +160,6 @@ namespace EasyDesk.Windows
         public DesktopBounds[] GetAllScreens()
         {
             var bounds = new List<DesktopBounds>();
-            var primaryRect = new RECT();
-            primaryRect.left = 0;
-            primaryRect.top = 0;
-            primaryRect.right = User32.GetSystemMetrics(Win32Constants.SM_CXSCREEN);
-            primaryRect.bottom = User32.GetSystemMetrics(Win32Constants.SM_CYSCREEN);
 
             GCHandle handle = GCHandle.Alloc(bounds);
             try
@@ -172,8 +167,8 @@ namespace EasyDesk.Windows
                 User32.MonitorEnumProc callback = (IntPtr hMonitor, IntPtr hdc, ref RECT rc, IntPtr lParam) =>
                 {
                     var list = (List<DesktopBounds>)GCHandle.FromIntPtr(lParam).Target;
-                    var mi = new MONITORINFOEX();
-                    mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+                    var mi = new MONITORINFO();
+                    mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
                     if (User32.GetMonitorInfo(hMonitor, ref mi))
                     {
                         list.Add(new DesktopBounds
@@ -185,7 +180,7 @@ namespace EasyDesk.Windows
                             IsPrimary = (mi.dwFlags & Win32Constants.MONITORINFOF_PRIMARY) != 0
                         });
                     }
-                    return true; // continue enumeration
+                    return true;
                 };
 
                 User32.EnumDisplayMonitors(
@@ -213,7 +208,7 @@ namespace EasyDesk.Windows
             else
             {
                 // Specific monitor by index
-                var screens = new WindowsDesktopInfo().GetAllBounds();
+                var screens = new WindowsScreenCapturer().GetAllScreens();
                 if (targetDisplay >= screens.Length)
                     throw new ArgumentOutOfRangeException(
                         string.Format("Monitor index {0} out of range (found {1} monitors).",

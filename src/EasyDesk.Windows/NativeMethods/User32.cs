@@ -58,6 +58,12 @@ namespace EasyDesk.Windows.NativeMethods
             IntPtr hMonitor,
             ref MONITORINFOEX lpmi);
 
+        [DllImport(DllName, EntryPoint = "GetMonitorInfo", CharSet = CharSet.Auto)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetMonitorInfo(
+            IntPtr hMonitor,
+            ref MONITORINFO lpmi);
+
         // ── DC / Window ──
 
         [DllImport(DllName)]

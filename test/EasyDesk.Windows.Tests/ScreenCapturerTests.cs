@@ -130,5 +130,33 @@ namespace EasyDesk.Windows.Tests
                     Marshal.FreeHGlobal(frame.Scan0);
             }
         }
+
+        [Fact]
+        public void CaptureScreen_TargetDisplayPrimary_ShouldReturnValidFrame()
+        {
+            var capturer = _factory.CreateScreenCapturer();
+            var options = new CaptureOptions { TargetDisplay = 0, IncludeCursor = true };
+            ScreenFrame frame = null;
+            try
+            {
+                frame = capturer.CaptureScreen(options);
+                Assert.NotNull(frame);
+                Assert.True(frame.Width > 0);
+                Assert.True(frame.Height > 0);
+            }
+            finally
+            {
+                if (frame != null && frame.Scan0 != IntPtr.Zero)
+                    Marshal.FreeHGlobal(frame.Scan0);
+            }
+        }
+
+        [Fact]
+        public void CaptureScreen_InvalidTargetDisplay_ShouldThrow()
+        {
+            var capturer = _factory.CreateScreenCapturer();
+            var options = new CaptureOptions { TargetDisplay = 999, IncludeCursor = true };
+            Assert.Throws<ArgumentOutOfRangeException>(() => capturer.CaptureScreen(options));
+        }
     }
 }

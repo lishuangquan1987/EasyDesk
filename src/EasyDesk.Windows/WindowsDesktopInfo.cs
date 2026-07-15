@@ -13,6 +13,14 @@ namespace EasyDesk.Windows
     {
         public DesktopBounds GetPrimaryBounds()
         {
+            var screens = GetAllBounds();
+            foreach (var s in screens)
+            {
+                if (s.IsPrimary)
+                    return s;
+            }
+
+            // Fallback: use system metrics (should never reach here)
             return new DesktopBounds
             {
                 X = 0,
@@ -25,9 +33,7 @@ namespace EasyDesk.Windows
 
         public DesktopBounds[] GetAllBounds()
         {
-            // Reuse the screen capturer's monitor enumeration
-            var capturer = new WindowsScreenCapturer();
-            return capturer.GetAllScreens();
+            return new WindowsScreenCapturer().GetAllScreens();
         }
 
         public DesktopBounds GetVirtualScreenBounds()

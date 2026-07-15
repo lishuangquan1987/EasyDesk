@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using Xunit;
 using EasyDesk.Windows;
@@ -133,6 +134,34 @@ namespace EasyDesk.Windows.Tests
             thread.SetApartmentState(ApartmentState.STA);
             thread.Start();
             thread.Join();
+        }
+
+        [Fact]
+        public void GetText_NonStaThread_ShouldNotThrow()
+        {
+            // Non-STA thread accessing clipboard should fail gracefully or throw
+            // Exception must be captured INSIDE the MTA thread — it won't propagate via Join()
+            string result = null;
+            Exception threadEx = null;
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    var clip = _factory.CreateClipboardService();
+                    result = clip.GetText(); // May return null or throw on non-STA
+                }
+                catch (Exception ex)
+                {
+                    threadEx = ex;
+                }
+            });
+            thread.SetApartmentState(ApartmentState.MTA);
+            thread.Start();
+            thread.Join();
+
+            // We don't assert on the result — the important thing is no unhandled crash
+            Assert.Null(threadEx);
         }
     }
 }

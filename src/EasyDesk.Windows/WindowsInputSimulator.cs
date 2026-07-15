@@ -12,28 +12,38 @@ namespace EasyDesk.Windows
     /// </summary>
     public class WindowsInputSimulator : IInputSimulator
     {
-        private const int InputStructSize = 28; // sizeof(INPUT) on 32-bit
+        private static readonly int InputStructSize = Marshal.SizeOf(typeof(INPUT));
 
-        public void SendMouseMove(int x, int y, bool absolute)
+        /// <summary>
+        /// Send a single INPUT and throw if it fails.
+        /// </summary>
+        private static void SendInputChecked(INPUT input, string context)
         {
             var inputs = new INPUT[1];
-            inputs[0].type = Win32Constants.INPUT_MOUSE;
-            inputs[0].mkhi.mi.dx = x;
-            inputs[0].mkhi.mi.dy = y;
-            inputs[0].mkhi.mi.mouseData = 0;
-            inputs[0].mkhi.mi.dwFlags = (uint)MouseEventFlags.Move;
-            if (absolute)
-                inputs[0].mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
-            inputs[0].mkhi.mi.time = 0;
-            inputs[0].mkhi.mi.dwExtraInfo = IntPtr.Zero;
-
+            inputs[0] = input;
             var result = User32.SendInput(1, inputs, InputStructSize);
             if (result == 0)
             {
                 var error = Marshal.GetLastWin32Error();
                 throw new InvalidOperationException(
-                    string.Format("SendInput (mouse move) failed. Win32 error: {0}", error));
+                    string.Format("SendInput ({0}) failed. Win32 error: {1}", context, error));
             }
+        }
+
+        public void SendMouseMove(int x, int y, bool absolute)
+        {
+            var input = new INPUT();
+            input.type = Win32Constants.INPUT_MOUSE;
+            input.mkhi.mi.dx = x;
+            input.mkhi.mi.dy = y;
+            input.mkhi.mi.mouseData = 0;
+            input.mkhi.mi.dwFlags = (uint)MouseEventFlags.Move;
+            if (absolute)
+                input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
+            input.mkhi.mi.time = 0;
+            input.mkhi.mi.dwExtraInfo = IntPtr.Zero;
+
+            SendInputChecked(input, "mouse move");
         }
 
         public void SendMouseButton(MouseButton button, bool down)
@@ -41,42 +51,30 @@ namespace EasyDesk.Windows
             uint flags = GetMouseButtonFlags(button, down);
             if (flags == 0) return;
 
-            var inputs = new INPUT[1];
-            inputs[0].type = Win32Constants.INPUT_MOUSE;
-            inputs[0].mkhi.mi.dx = 0;
-            inputs[0].mkhi.mi.dy = 0;
-            inputs[0].mkhi.mi.mouseData = GetMouseButtonData(button);
-            inputs[0].mkhi.mi.dwFlags = flags;
-            inputs[0].mkhi.mi.time = 0;
-            inputs[0].mkhi.mi.dwExtraInfo = IntPtr.Zero;
+            var input = new INPUT();
+            input.type = Win32Constants.INPUT_MOUSE;
+            input.mkhi.mi.dx = 0;
+            input.mkhi.mi.dy = 0;
+            input.mkhi.mi.mouseData = GetMouseButtonData(button);
+            input.mkhi.mi.dwFlags = flags;
+            input.mkhi.mi.time = 0;
+            input.mkhi.mi.dwExtraInfo = IntPtr.Zero;
 
-            var result = User32.SendInput(1, inputs, InputStructSize);
-            if (result == 0)
-            {
-                var error = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    string.Format("SendInput (mouse button) failed. Win32 error: {0}", error));
-            }
+            SendInputChecked(input, "mouse button");
         }
 
         public void SendMouseWheel(int delta)
         {
-            var inputs = new INPUT[1];
-            inputs[0].type = Win32Constants.INPUT_MOUSE;
-            inputs[0].mkhi.mi.dx = 0;
-            inputs[0].mkhi.mi.dy = 0;
-            inputs[0].mkhi.mi.mouseData = (uint)delta;
-            inputs[0].mkhi.mi.dwFlags = (uint)MouseEventFlags.Wheel;
-            inputs[0].mkhi.mi.time = 0;
-            inputs[0].mkhi.mi.dwExtraInfo = IntPtr.Zero;
+            var input = new INPUT();
+            input.type = Win32Constants.INPUT_MOUSE;
+            input.mkhi.mi.dx = 0;
+            input.mkhi.mi.dy = 0;
+            input.mkhi.mi.mouseData = (uint)delta;
+            input.mkhi.mi.dwFlags = (uint)MouseEventFlags.Wheel;
+            input.mkhi.mi.time = 0;
+            input.mkhi.mi.dwExtraInfo = IntPtr.Zero;
 
-            var result = User32.SendInput(1, inputs, InputStructSize);
-            if (result == 0)
-            {
-                var error = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    string.Format("SendInput (mouse wheel) failed. Win32 error: {0}", error));
-            }
+            SendInputChecked(input, "mouse wheel");
         }
 
         public void SendKeyDown(VirtualKeyCode key)
@@ -91,30 +89,22 @@ namespace EasyDesk.Windows
 
         private void SendKeyEvent(VirtualKeyCode key, bool down)
         {
-            var inputs = new INPUT[1];
-            inputs[0].type = Win32Constants.INPUT_KEYBOARD;
-            inputs[0].mkhi.ki.wVk = (ushort)key;
-            inputs[0].mkhi.ki.wScan = 0;
-            inputs[0].mkhi.ki.dwFlags = down
+            var input = new INPUT();
+            input.type = Win32Constants.INPUT_KEYBOARD;
+            input.mkhi.ki.wVk = (ushort)key;
+            input.mkhi.ki.wScan = 0;
+            input.mkhi.ki.dwFlags = down
                 ? (uint)KeyEventFlags.KeyDown
                 : (uint)KeyEventFlags.KeyUp;
-            inputs[0].mkhi.ki.time = 0;
-            inputs[0].mkhi.ki.dwExtraInfo = IntPtr.Zero;
+            input.mkhi.ki.time = 0;
+            input.mkhi.ki.dwExtraInfo = IntPtr.Zero;
 
-            // Set ExtendedKey flag for specific keys
             if (IsExtendedKey(key))
             {
-                inputs[0].mkhi.ki.dwFlags |= (uint)KeyEventFlags.ExtendedKey;
+                input.mkhi.ki.dwFlags |= (uint)KeyEventFlags.ExtendedKey;
             }
 
-            var result = User32.SendInput(1, inputs, InputStructSize);
-            if (result == 0)
-            {
-                var error = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    string.Format("SendInput (key event) failed. VK={0}, Win32 error: {1}",
-                        (int)key, error));
-            }
+            SendInputChecked(input, string.Format("key event VK={0}", (int)key));
         }
 
         public void SendText(string text)
@@ -124,34 +114,34 @@ namespace EasyDesk.Windows
             foreach (char c in text)
             {
                 // Send KEYDOWN
-                var inputsDown = new INPUT[1];
-                inputsDown[0].type = Win32Constants.INPUT_KEYBOARD;
-                inputsDown[0].mkhi.ki.wVk = 0;        // Must be 0 for Unicode
-                inputsDown[0].mkhi.ki.wScan = c;       // UTF-16 character
-                inputsDown[0].mkhi.ki.dwFlags = (uint)(KeyEventFlags.Unicode | KeyEventFlags.KeyDown);
-                inputsDown[0].mkhi.ki.time = 0;
-                inputsDown[0].mkhi.ki.dwExtraInfo = IntPtr.Zero;
+                var inputDown = new INPUT();
+                inputDown.type = Win32Constants.INPUT_KEYBOARD;
+                inputDown.mkhi.ki.wVk = 0;        // Must be 0 for Unicode
+                inputDown.mkhi.ki.wScan = c;       // UTF-16 character
+                inputDown.mkhi.ki.dwFlags = (uint)(KeyEventFlags.Unicode | KeyEventFlags.KeyDown);
+                inputDown.mkhi.ki.time = 0;
+                inputDown.mkhi.ki.dwExtraInfo = IntPtr.Zero;
 
-                var resultDown = User32.SendInput(1, inputsDown, InputStructSize);
-                if (resultDown == 0)
-                {
-                    var error = Marshal.GetLastWin32Error();
-                    throw new InvalidOperationException(
-                        string.Format("SendInput (Unicode down) failed. Char='{0}', Win32 error: {1}",
-                            c, error));
-                }
+                SendInputChecked(inputDown, string.Format("Unicode down '{0}'", c));
 
-                // Send KEYUP
+                // Send KEYUP (failure is non-fatal — key may already be up)
+                var inputUp = new INPUT();
+                inputUp.type = Win32Constants.INPUT_KEYBOARD;
+                inputUp.mkhi.ki.wVk = 0;
+                inputUp.mkhi.ki.wScan = c;
+                inputUp.mkhi.ki.dwFlags = (uint)(KeyEventFlags.Unicode | KeyEventFlags.KeyUp);
+                inputUp.mkhi.ki.time = 0;
+                inputUp.mkhi.ki.dwExtraInfo = IntPtr.Zero;
+
                 var inputsUp = new INPUT[1];
-                inputsUp[0].type = Win32Constants.INPUT_KEYBOARD;
-                inputsUp[0].mkhi.ki.wVk = 0;
-                inputsUp[0].mkhi.ki.wScan = c;
-                inputsUp[0].mkhi.ki.dwFlags = (uint)(KeyEventFlags.Unicode | KeyEventFlags.KeyUp);
-                inputsUp[0].mkhi.ki.time = 0;
-                inputsUp[0].mkhi.ki.dwExtraInfo = IntPtr.Zero;
-
-                User32.SendInput(1, inputsUp, InputStructSize);
-                // KEYUP failures are ignored (key may already be up)
+                inputsUp[0] = inputUp;
+                var resultUp = User32.SendInput(1, inputsUp, InputStructSize);
+                if (resultUp == 0)
+                {
+                    System.Diagnostics.Trace.TraceWarning(
+                        "SendInput (Unicode up '{0}') failed. Win32 error: {1}",
+                        c, Marshal.GetLastWin32Error());
+                }
             }
         }
 
