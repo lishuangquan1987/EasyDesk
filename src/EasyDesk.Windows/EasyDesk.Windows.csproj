@@ -16,8 +16,10 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net40'">
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <PackageReference Include="SharpDX" Version="4.0.1" />
     <PackageReference Include="SharpDX.DXGI" Version="4.0.1" />
     <PackageReference Include="SharpDX.Direct3D11" Version="4.0.1" />
+    <PackageReference Include="SharpDX.MediaFoundation" Version="4.0.1" />
   </ItemGroup>
 
 </Project>

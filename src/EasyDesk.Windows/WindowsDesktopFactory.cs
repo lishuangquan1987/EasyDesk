@@ -35,6 +35,26 @@ namespace EasyDesk.Windows
             return new WindowsScreenCapturer();
         }
 
+        /// <summary>
+        /// 创建最佳的视频编码器。
+        /// Win7+ → H.264 MediaFoundation 硬件编码；回退 → Baseline (Zlib/JPEG)
+        /// </summary>
+        public IVideoEncoder CreateVideoEncoder()
+        {
+#if NET40
+            if (Environment.OSVersion.Version.Major > 6 ||
+                (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor >= 1))
+            {
+                try
+                {
+                    return new H264VideoEncoder();
+                }
+                catch { }
+            }
+#endif
+            return new BaselineVideoEncoder();
+        }
+
         public ICursorCapturer CreateCursorCapturer()
         {
             return new WindowsCursorCapturer();
