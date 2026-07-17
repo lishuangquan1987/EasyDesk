@@ -1,3 +1,4 @@
+using System;
 using EasyDesk.Core;
 
 namespace EasyDesk.Windows
@@ -15,6 +16,22 @@ namespace EasyDesk.Windows
 
         public IScreenCapturer CreateScreenCapturer()
         {
+#if NET40
+            // Win8+ (6.2+) 优先使用 DXGI Desktop Duplication
+            if (Environment.OSVersion.Version.Major > 6 ||
+                (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor >= 2))
+            {
+                try
+                {
+                    var dxgi = new DxgiScreenCapturer();
+                    return dxgi;
+                }
+                catch
+                {
+                    // DXGI 初始化失败（如无 GPU、远程桌面等），降级到 BitBlt
+                }
+            }
+#endif
             return new WindowsScreenCapturer();
         }
 

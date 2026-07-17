@@ -34,12 +34,22 @@ namespace EasyDesk.Windows
         {
             var input = new INPUT();
             input.type = Win32Constants.INPUT_MOUSE;
-            input.mkhi.mi.dx = x;
-            input.mkhi.mi.dy = y;
             input.mkhi.mi.mouseData = 0;
             input.mkhi.mi.dwFlags = (uint)MouseEventFlags.Move;
             if (absolute)
+            {
+                // SendInput 的绝对坐标范围是 0~65535，需要将像素坐标归一化
+                int screenW = User32.GetSystemMetrics(Win32Constants.SM_CXSCREEN);
+                int screenH = User32.GetSystemMetrics(Win32Constants.SM_CYSCREEN);
+                input.mkhi.mi.dx = (x * 65535) / Math.Max(screenW, 1);
+                input.mkhi.mi.dy = (y * 65535) / Math.Max(screenH, 1);
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
+            }
+            else
+            {
+                input.mkhi.mi.dx = x;
+                input.mkhi.mi.dy = y;
+            }
             input.mkhi.mi.time = 0;
             input.mkhi.mi.dwExtraInfo = IntPtr.Zero;
 
