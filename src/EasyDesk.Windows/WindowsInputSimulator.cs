@@ -38,11 +38,13 @@ namespace EasyDesk.Windows
             input.mkhi.mi.dwFlags = (uint)MouseEventFlags.Move;
             if (absolute)
             {
-                // SendInput 的绝对坐标范围是 0~65535，需要将像素坐标归一化
+                // SendInput 的绝对坐标范围是 0~65535，映射到 [0, screenW-1] 像素。
+                // 用 screenW-1 做除数让 x=screenW-1 时 dx=65535（最右像素可达）；
+                // 用 screenW 会让最后一像素列不可达（dx 永远 < 65535）。
                 int screenW = User32.GetSystemMetrics(Win32Constants.SM_CXSCREEN);
                 int screenH = User32.GetSystemMetrics(Win32Constants.SM_CYSCREEN);
-                input.mkhi.mi.dx = (x * 65535) / Math.Max(screenW, 1);
-                input.mkhi.mi.dy = (y * 65535) / Math.Max(screenH, 1);
+                input.mkhi.mi.dx = (x * 65535) / Math.Max(screenW - 1, 1);
+                input.mkhi.mi.dy = (y * 65535) / Math.Max(screenH - 1, 1);
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
             }
             else
