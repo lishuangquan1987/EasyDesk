@@ -102,6 +102,13 @@ namespace EasyDesk.Windows.NativeMethods
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool IsClipboardFormatAvailable(uint format);
 
+        /// <summary>
+        /// Register a custom clipboard format by name. Used for CF_HDROP (which is predefined at 15)
+        /// but exposed here for completeness when dealing with registered formats.
+        /// </summary>
+        [DllImport(DllName, SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern uint RegisterClipboardFormat(string lpszFormat);
+
         // ── Monitor enum callback delegate ──
 
         [return: MarshalAs(UnmanagedType.Bool)]

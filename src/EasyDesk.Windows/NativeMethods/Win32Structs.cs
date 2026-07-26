@@ -174,6 +174,10 @@ namespace EasyDesk.Windows.NativeMethods
 
         // Clipboard formats
         public const uint CF_UNICODETEXT = 13;
+        /// <summary>文件列表剪贴板格式（右键复制文件时使用）。</summary>
+        public const uint CF_HDROP = 15;
+        /// <summary>设备无关位图剪贴板格式（截图/复制图片时使用）。</summary>
+        public const uint CF_DIB = 8;
 
         // Global memory flags
         public const uint GMEM_MOVEABLE = 0x0002;
