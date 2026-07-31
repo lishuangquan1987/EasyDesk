@@ -72,13 +72,20 @@ namespace EasyDesk.Windows
             {
                 int hotspotX = ii.xHotspot;
                 int hotspotY = ii.yHotspot;
-
-                // Get bitmap dimensions from AND mask
                 int width = 0;
                 int height = 0;
                 int andStride = 0;
 
-                if (ii.hbmMask != IntPtr.Zero)
+                // 光标类型判定（Win32 ICONINFO 约定）：
+                // - 颜色光标（现代 Windows 桌面默认箭头带阴影即属此类）：hbmColor=颜色 XOR
+                //   位图（高度=光标高），hbmMask=仅 AND 掩码（高度=光标高）。
+                // - 黑白光标：hbmColor=NULL，hbmMask=AND+XOR 双倍高（上半 AND、下半 XOR）。
+                // 旧实现无条件对高度 /2 且只读 hbmMask，颜色光标被当成黑白光标处理，
+                // 抓出来的是半高 + 错位像素（默认箭头即垃圾数据）。
+                bool hasColor = ii.hbmColor != IntPtr.Zero;
+                IntPtr xorBitmap = hasColor ? ii.hbmColor : ii.hbmMask;
+
+                if (xorBitmap != IntPtr.Zero)
                 {
                     IntPtr hdc = User32.GetDC(IntPtr.Zero);
                     if (hdc == IntPtr.Zero)
@@ -93,16 +100,18 @@ namespace EasyDesk.Windows
                     }
                     try
                     {
-                        // Query bitmap dimensions
+                        // 查询位图尺寸（XOR 源位图）
                         var bmiQuery = new BITMAPINFO();
                         bmiQuery.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
                         bmiQuery.bmiHeader.biBitCount = 0;
 
                         Gdi32.GetDIBits(
-                            hdc, ii.hbmMask, 0, 0, IntPtr.Zero, ref bmiQuery, Win32Constants.DIB_RGB_COLORS);
+                            hdc, xorBitmap, 0, 0, IntPtr.Zero, ref bmiQuery, Win32Constants.DIB_RGB_COLORS);
 
                         width = Math.Abs(bmiQuery.bmiHeader.biWidth);
-                        height = Math.Abs(bmiQuery.bmiHeader.biHeight) / 2; // doubled: XOR + AND
+                        int fullHeight = Math.Abs(bmiQuery.bmiHeader.biHeight);
+                        // 颜色光标：hbmColor 高度即光标高；黑白光标：hbmMask 双倍高
+                        height = hasColor ? fullHeight : fullHeight / 2;
                         andStride = ((width + 15) / 16) * 2; // 1bpp, 2-byte aligned
 
                         if (width == 0 || height == 0)
@@ -121,23 +130,23 @@ namespace EasyDesk.Windows
                         int totalBytes = (andStride + xorStride) * height;
                         var imageData = new byte[totalBytes];
 
-                        // Read the combined mask as 32bpp top-down DIB
-                        var bmiFull = new BITMAPINFO();
-                        bmiFull.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                        bmiFull.bmiHeader.biWidth = width;
-                        bmiFull.bmiHeader.biHeight = -(height * 2);
-                        bmiFull.bmiHeader.biPlanes = 1;
-                        bmiFull.bmiHeader.biBitCount = 32;
-                        bmiFull.bmiHeader.biCompression = Win32Constants.BI_RGB;
+                        // 读 XOR 掩码（32bpp top-down DIB，行 0 在顶）
+                        var bmiXor = new BITMAPINFO();
+                        bmiXor.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                        bmiXor.bmiHeader.biWidth = width;
+                        bmiXor.bmiHeader.biHeight = -height;
+                        bmiXor.bmiHeader.biPlanes = 1;
+                        bmiXor.bmiHeader.biBitCount = 32;
+                        bmiXor.bmiHeader.biCompression = Win32Constants.BI_RGB;
 
-                        int fullSize = width * 4 * height * 2;
-                        IntPtr fullBuffer = Marshal.AllocHGlobal(fullSize);
+                        int xorSize = width * 4 * height;
+                        IntPtr xorBuffer = Marshal.AllocHGlobal(xorSize);
                         try
                         {
-                            int scanLines = Gdi32.GetDIBits(hdc, ii.hbmMask, 0, (uint)(height * 2),
-                                fullBuffer, ref bmiFull, Win32Constants.DIB_RGB_COLORS);
+                            int xorLines = Gdi32.GetDIBits(hdc, xorBitmap, 0, (uint)height,
+                                xorBuffer, ref bmiXor, Win32Constants.DIB_RGB_COLORS);
 
-                            if (scanLines == 0)
+                            if (xorLines == 0)
                             {
                                 return new CursorInfo
                                 {
@@ -148,14 +157,56 @@ namespace EasyDesk.Windows
                                 };
                             }
 
-                            // Extract AND mask from bottom half (BGRA32 → 1bpp)
+                            // XOR 掩码 → imageData 后半段（每行 andStride 之后的 xorStride 字节）
+                            for (int row = 0; row < height; row++)
+                            {
+                                int destOffset = (andStride * height) + row * xorStride;
+                                int srcOffset = row * width * 4;
+                                for (int col = 0; col < width * 4; col++)
+                                    imageData[destOffset + col] =
+                                        Marshal.ReadByte(xorBuffer, srcOffset + col);
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(xorBuffer);
+                        }
+
+                        // 读 AND 掩码：颜色光标读 hbmMask（height 行）；黑白光标读 hbmMask 上半
+                        var bmiAnd = new BITMAPINFO();
+                        bmiAnd.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                        bmiAnd.bmiHeader.biWidth = width;
+                        bmiAnd.bmiHeader.biHeight = -height;
+                        bmiAnd.bmiHeader.biPlanes = 1;
+                        bmiAnd.bmiHeader.biBitCount = 32;
+                        bmiAnd.bmiHeader.biCompression = Win32Constants.BI_RGB;
+
+                        int andSize = width * 4 * height;
+                        IntPtr andBuffer = Marshal.AllocHGlobal(andSize);
+                        try
+                        {
+                            int andLines = Gdi32.GetDIBits(hdc, ii.hbmMask, 0, (uint)height,
+                                andBuffer, ref bmiAnd, Win32Constants.DIB_RGB_COLORS);
+
+                            if (andLines == 0)
+                            {
+                                return new CursorInfo
+                                {
+                                    X = x, Y = y,
+                                    HotspotX = hotspotX, HotspotY = hotspotY,
+                                    Width = 0, Height = 0,
+                                    ImageData = new byte[0]
+                                };
+                            }
+
+                            // AND 掩码 → imageData 前半段（BGRA32 → 1bpp，AND=1 → 透明）
                             for (int row = 0; row < height; row++)
                             {
                                 int destOffset = row * andStride;
                                 for (int col = 0; col < width; col++)
                                 {
-                                    int srcOffset = (height + row) * width * 4 + col * 4;
-                                    byte pixel = Marshal.ReadByte(fullBuffer, srcOffset);
+                                    int srcOffset = row * width * 4 + col * 4;
+                                    byte pixel = Marshal.ReadByte(andBuffer, srcOffset);
                                     if (pixel != 0) // AND=1 → transparent
                                     {
                                         int byteIndex = col / 8;
@@ -164,22 +215,10 @@ namespace EasyDesk.Windows
                                     }
                                 }
                             }
-
-                            // Copy XOR mask from top half
-                            for (int row = 0; row < height; row++)
-                            {
-                                int destOffset = (andStride * height) + row * xorStride;
-                                int srcOffset = row * width * 4;
-                                for (int col = 0; col < width * 4; col++)
-                                {
-                                    imageData[destOffset + col] =
-                                        Marshal.ReadByte(fullBuffer, srcOffset + col);
-                                }
-                            }
                         }
                         finally
                         {
-                            Marshal.FreeHGlobal(fullBuffer);
+                            Marshal.FreeHGlobal(andBuffer);
                         }
 
                         return new CursorInfo
@@ -196,7 +235,7 @@ namespace EasyDesk.Windows
                     }
                 }
 
-                // hbmMask is null — no cursor image available
+                // hbmMask 与 hbmColor 均为 null — 无光标图像可用
                 return new CursorInfo
                 {
                     X = x, Y = y,

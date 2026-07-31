@@ -13,6 +13,8 @@ namespace EasyDesk.Windows
     public class WindowsInputSimulator : IInputSimulator
     {
         private static readonly int InputStructSize = Marshal.SizeOf(typeof(INPUT));
+        // SendInput 进程级共享，多会话并发调用非线程安全；串行化所有注入。
+        private static readonly object SendLock = new object();
 
         /// <summary>
         /// Send a single INPUT and throw if it fails.
@@ -21,7 +23,11 @@ namespace EasyDesk.Windows
         {
             var inputs = new INPUT[1];
             inputs[0] = input;
-            var result = User32.SendInput(1, inputs, InputStructSize);
+            uint result;
+            lock (SendLock)
+            {
+                result = User32.SendInput(1, inputs, InputStructSize);
+            }
             if (result == 0)
             {
                 var error = Marshal.GetLastWin32Error();
@@ -38,14 +44,18 @@ namespace EasyDesk.Windows
             input.mkhi.mi.dwFlags = (uint)MouseEventFlags.Move;
             if (absolute)
             {
-                // SendInput 的绝对坐标范围是 0~65535，映射到 [0, screenW-1] 像素。
-                // 用 screenW-1 做除数让 x=screenW-1 时 dx=65535（最右像素可达）；
-                // 用 screenW 会让最后一像素列不可达（dx 永远 < 65535）。
-                int screenW = User32.GetSystemMetrics(Win32Constants.SM_CXSCREEN);
-                int screenH = User32.GetSystemMetrics(Win32Constants.SM_CYSCREEN);
-                input.mkhi.mi.dx = (x * 65535) / Math.Max(screenW - 1, 1);
-                input.mkhi.mi.dy = (y * 65535) / Math.Max(screenH - 1, 1);
+                // SendInput 的绝对坐标范围是 0~65535。旧实现只用主显示器（SM_CXSCREEN）
+                // 且未设 VIRTUALDESK：副屏坐标不可达。改用虚拟桌面范围 + 原点偏移，
+                // 并用 MOUSEEVENTF_VIRTUALDESK 让映射覆盖所有显示器。
+                int virtualX = User32.GetSystemMetrics(Win32Constants.SM_XVIRTUALSCREEN);
+                int virtualY = User32.GetSystemMetrics(Win32Constants.SM_YVIRTUALSCREEN);
+                int virtualW = User32.GetSystemMetrics(Win32Constants.SM_CXVIRTUALSCREEN);
+                int virtualH = User32.GetSystemMetrics(Win32Constants.SM_CYVIRTUALSCREEN);
+                // 用 (范围-1) 做除数让最右/最下像素可达（dx=65535）
+                input.mkhi.mi.dx = ((x - virtualX) * 65535) / Math.Max(virtualW - 1, 1);
+                input.mkhi.mi.dy = ((y - virtualY) * 65535) / Math.Max(virtualH - 1, 1);
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
+                input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.VirtualDesk;
             }
             else
             {
@@ -147,7 +157,11 @@ namespace EasyDesk.Windows
 
                 var inputsUp = new INPUT[1];
                 inputsUp[0] = inputUp;
-                var resultUp = User32.SendInput(1, inputsUp, InputStructSize);
+                uint resultUp;
+                lock (SendLock)
+                {
+                    resultUp = User32.SendInput(1, inputsUp, InputStructSize);
+                }
                 if (resultUp == 0)
                 {
                     System.Diagnostics.Trace.TraceWarning(

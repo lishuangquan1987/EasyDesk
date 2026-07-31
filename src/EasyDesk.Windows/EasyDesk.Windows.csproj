@@ -22,4 +22,11 @@
     <PackageReference Include="SharpDX.MediaFoundation" Version="4.0.1" />
   </ItemGroup>
 
+  <!-- netstandard2.0（被 net8.0-windows 服务端/客户端消费）：DXGI 截屏同样需要 SharpDX -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="SharpDX" Version="4.0.1" />
+    <PackageReference Include="SharpDX.DXGI" Version="4.0.1" />
+    <PackageReference Include="SharpDX.Direct3D11" Version="4.0.1" />
+  </ItemGroup>
+
 </Project>

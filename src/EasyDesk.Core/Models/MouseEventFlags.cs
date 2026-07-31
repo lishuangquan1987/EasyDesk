@@ -43,6 +43,9 @@ namespace EasyDesk.Core.Models
         HWheel = 0x1000,
 
         /// <summary>Absolute position (0-65535 mapped to virtual desktop).</summary>
-        Absolute = 0x8000
+        Absolute = 0x8000,
+
+        /// <summary>Coordinates map to the entire virtual desktop (all monitors).</summary>
+        VirtualDesk = 0x4000
     }
 }

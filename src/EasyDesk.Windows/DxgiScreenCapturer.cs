@@ -1,5 +1,3 @@
-#if NET40
-
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -24,9 +22,12 @@ namespace EasyDesk.Windows
         private OutputDuplication _duplication;
         private OutputDescription _outputDesc;
         private Texture2D _stagingTex;
+        private SharpDX.DXGI.Factory _factory;
         private int _screenWidth;
         private int _screenHeight;
         private bool _disposed;
+        // Reinitialize 失败后置 true，下一次 CaptureScreen 自动重试，避免永久静默返回空帧
+        private bool _needsInit;
 
         /// <summary>
         /// 初始化 DXGI 桌面复制。失败时抛出异常，调用方应回退到 BitBlt。
@@ -39,50 +40,71 @@ namespace EasyDesk.Windows
         private void Initialize(int adapterIndex = 0, int outputIndex = 0)
         {
             Cleanup();
+            _needsInit = true;
 
-            // 创建 D3D11 设备
-            _device = new SharpDX.Direct3D11.Device(
-                DriverType.Hardware,
-                DeviceCreationFlags.None,
-                FeatureLevel.Level_11_0,
-                FeatureLevel.Level_10_1,
-                FeatureLevel.Level_10_0);
-
-            // 获取 DXGI 适配器和输出
-            var dxgiDevice = _device.QueryInterface<SharpDX.DXGI.Device>();
-            var factory = dxgiDevice.GetParent<SharpDX.DXGI.Factory>();
-            var adapter = factory.GetAdapter(adapterIndex);
-            var output = adapter.GetOutput(outputIndex);
-            _outputDesc = output.Description;
-
-            // 获取输出尺寸
-            var bounds = _outputDesc.DesktopBounds;
-            _screenWidth = bounds.Right - bounds.Left;
-            _screenHeight = bounds.Bottom - bounds.Top;
-
-            // 创建输出复制接口
-            var output1 = output.QueryInterface<Output1>();
-            _duplication = output1.DuplicateOutput(_device);
-
-            // 创建用于读取像素的暂存纹理
-            var texDesc = new Texture2DDescription
+            SharpDX.Direct3D11.Device device = null;
+            SharpDX.DXGI.Factory factory = null;
+            SharpDX.DXGI.Adapter adapter = null;
+            SharpDX.DXGI.Output output = null;
+            Output1 output1 = null;
+            try
             {
-                Width = _screenWidth,
-                Height = _screenHeight,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = Format.B8G8R8A8_UNorm,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Staging,
-                BindFlags = BindFlags.None,
-                CpuAccessFlags = CpuAccessFlags.Read,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            _stagingTex = new Texture2D(_device, texDesc);
+                // 创建 D3D11 设备
+                device = new SharpDX.Direct3D11.Device(
+                    DriverType.Hardware,
+                    DeviceCreationFlags.None,
+                    FeatureLevel.Level_11_0,
+                    FeatureLevel.Level_10_1,
+                    FeatureLevel.Level_10_0);
 
-            output.Dispose();
-            adapter.Dispose();
-            dxgiDevice.Dispose();
+                // 获取 DXGI 适配器和输出
+                var dxgiDevice = device.QueryInterface<SharpDX.DXGI.Device>();
+                factory = dxgiDevice.GetParent<SharpDX.DXGI.Factory>();
+                adapter = factory.GetAdapter(adapterIndex);
+                output = adapter.GetOutput(outputIndex);
+                _outputDesc = output.Description;
+
+                // 获取输出尺寸
+                var bounds = _outputDesc.DesktopBounds;
+                _screenWidth = bounds.Right - bounds.Left;
+                _screenHeight = bounds.Bottom - bounds.Top;
+
+                // 创建输出复制接口
+                output1 = output.QueryInterface<Output1>();
+                _duplication = output1.DuplicateOutput(device);
+
+                // 创建用于读取像素的暂存纹理
+                var texDesc = new Texture2DDescription
+                {
+                    Width = _screenWidth,
+                    Height = _screenHeight,
+                    MipLevels = 1,
+                    ArraySize = 1,
+                    Format = Format.B8G8R8A8_UNorm,
+                    SampleDescription = new SampleDescription(1, 0),
+                    Usage = ResourceUsage.Staging,
+                    BindFlags = BindFlags.None,
+                    CpuAccessFlags = CpuAccessFlags.Read,
+                    OptionFlags = ResourceOptionFlags.None
+                };
+                _stagingTex = new Texture2D(device, texDesc);
+
+                // 所有权转移给字段：Cleanup 时按 纹理→复制→设备→工厂 的顺序释放
+                _device = device;
+                _factory = factory;
+                device = null;
+                factory = null;
+                _needsInit = false;
+            }
+            finally
+            {
+                // COM 局部变量全部释放，防止初始化路径泄漏 D3D11/DXGI 对象
+                if (output1 != null) output1.Dispose();
+                if (output != null) output.Dispose();
+                if (adapter != null) adapter.Dispose();
+                if (factory != null) factory.Dispose();
+                if (device != null) device.Dispose();
+            }
         }
 
         /// <summary>
@@ -101,6 +123,15 @@ namespace EasyDesk.Windows
         {
             if (_disposed)
                 return CreateEmptyFrame();
+
+            // 上次 Reinitialize 失败后自愈：每次调用尝试重建，而不是永久静默返回空帧
+            if (_needsInit || _duplication == null || _device == null)
+            {
+                try { Initialize(); }
+                catch { return CreateEmptyFrame(); }
+                if (_duplication == null)
+                    return CreateEmptyFrame();
+            }
 
             try
             {
@@ -168,8 +199,14 @@ namespace EasyDesk.Windows
                 if (ex.ResultCode.Code == SharpDX.DXGI.ResultCode.AccessLost.Code ||
                     ex.ResultCode.Code == SharpDX.DXGI.ResultCode.WaitTimeout.Code)
                 {
-                    try { Reinitialize(); }
-                    catch { /* 重试失败，下次再试 */ }
+                    try
+                    {
+                        Reinitialize();
+                    }
+                    catch
+                    {
+                        // 重建失败：_needsInit 保持 true，下一次 CaptureScreen 自动重试
+                    }
                 }
                 return CreateEmptyFrame();
             }
@@ -188,12 +225,23 @@ namespace EasyDesk.Windows
             if (full.Scan0 == IntPtr.Zero)
                 return full;
 
+            // 越界校验：负坐标/超界会让 CopyMemory 直读 full.Scan0 之外的内存 → AV。
+            if (x < 0 || y < 0 || width <= 0 || height <= 0
+                || x > full.Width - width || y > full.Height - height)
+            {
+                Marshal.FreeHGlobal(full.Scan0);
+                throw new ArgumentOutOfRangeException(
+                    string.Format("CaptureRegion out of bounds: x={0} y={1} w={2} h={3} (screen {4}x{5})",
+                        x, y, width, height, full.Width, full.Height));
+            }
+
+            IntPtr regionBuffer = IntPtr.Zero;
             try
             {
                 int srcStride = full.Stride;
                 int dstStride = width * 4;
                 int totalBytes = dstStride * height;
-                IntPtr regionBuffer = Marshal.AllocHGlobal(totalBytes);
+                regionBuffer = Marshal.AllocHGlobal(totalBytes);
 
                 for (int row = 0; row < height; row++)
                 {
@@ -215,6 +263,8 @@ namespace EasyDesk.Windows
             }
             catch
             {
+                if (regionBuffer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(regionBuffer);
                 Marshal.FreeHGlobal(full.Scan0);
                 return CreateEmptyFrame();
             }
@@ -237,30 +287,51 @@ namespace EasyDesk.Windows
             var list = new List<DesktopBounds>();
             try
             {
-                var dxgiDevice = _device.QueryInterface<SharpDX.DXGI.Device>();
-                var factory = dxgiDevice.GetParent<SharpDX.DXGI.Factory>();
-                var adapter = factory.GetAdapter(0);
-                int outputCount = adapter.GetOutputCount();
-
-                for (int i = 0; i < outputCount; i++)
+                if (_device == null)
+                    return list.ToArray();
+                SharpDX.DXGI.Adapter adapter = null;
+                try
                 {
-                    using (var output = adapter.GetOutput(i))
+                    var dxgiDevice = _device.QueryInterface<SharpDX.DXGI.Device>();
+                    try
                     {
-                        var desc = output.Description;
-                        var bounds = desc.DesktopBounds;
-                        list.Add(new DesktopBounds
+                        var factory = dxgiDevice.GetParent<SharpDX.DXGI.Factory>();
+                        try
                         {
-                            X = bounds.Left,
-                            Y = bounds.Top,
-                            Width = bounds.Right - bounds.Left,
-                            Height = bounds.Bottom - bounds.Top,
-                            IsPrimary = i == 0
-                        });
+                            adapter = factory.GetAdapter(0);
+                            int outputCount = adapter.GetOutputCount();
+
+                            for (int i = 0; i < outputCount; i++)
+                            {
+                                using (var output = adapter.GetOutput(i))
+                                {
+                                    var desc = output.Description;
+                                    var bounds = desc.DesktopBounds;
+                                    list.Add(new DesktopBounds
+                                    {
+                                        X = bounds.Left,
+                                        Y = bounds.Top,
+                                        Width = bounds.Right - bounds.Left,
+                                        Height = bounds.Bottom - bounds.Top,
+                                        IsPrimary = i == 0
+                                    });
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            factory.Dispose();
+                        }
+                    }
+                    finally
+                    {
+                        dxgiDevice.Dispose();
                     }
                 }
-
-                adapter.Dispose();
-                dxgiDevice.Dispose();
+                finally
+                {
+                    if (adapter != null) adapter.Dispose();
+                }
             }
             catch { }
 
@@ -278,6 +349,7 @@ namespace EasyDesk.Windows
             if (_stagingTex != null) { _stagingTex.Dispose(); _stagingTex = null; }
             if (_duplication != null) { _duplication.Dispose(); _duplication = null; }
             if (_device != null) { _device.Dispose(); _device = null; }
+            if (_factory != null) { _factory.Dispose(); _factory = null; }
         }
 
         private static ScreenFrame CreateEmptyFrame()
@@ -305,5 +377,3 @@ namespace EasyDesk.Windows
         }
     }
 }
-
-#endif

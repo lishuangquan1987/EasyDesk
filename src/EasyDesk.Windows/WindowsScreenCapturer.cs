@@ -70,13 +70,20 @@ namespace EasyDesk.Windows
 
                     try
                     {
+                        IntPtr hOldBitmap = IntPtr.Zero;
                         IntPtr hBitmap = Gdi32.CreateCompatibleBitmap(hdcScreen, width, height);
                         if (hBitmap == IntPtr.Zero)
                             throw new InvalidOperationException("CreateCompatibleBitmap failed.");
 
                         try
                         {
-                            IntPtr hOldBitmap = Gdi32.SelectObject(hdcMem, hBitmap);
+                            hOldBitmap = Gdi32.SelectObject(hdcMem, hBitmap);
+                            if (hOldBitmap == IntPtr.Zero)
+                            {
+                                var selError = Marshal.GetLastWin32Error();
+                                throw new InvalidOperationException(
+                                    string.Format("SelectObject failed. Win32 error: {0}", selError));
+                            }
 
                             // BitBlt from screen to memory DC
                             uint rop = Win32Constants.SRCCOPY | Win32Constants.CAPTUREBLT;
@@ -111,11 +118,15 @@ namespace EasyDesk.Windows
                                 throw new InvalidOperationException(
                                     string.Format("GetDIBits failed. Win32 error: {0}", error));
                             }
-
-                            Gdi32.SelectObject(hdcMem, hOldBitmap);
                         }
                         finally
                         {
+                            // 先还原选择，再删除位图（Win32 规则：选入 DC 的对象 DeleteObject 返回 FALSE，
+                            // 异常路径若不还原会泄漏 GDI 句柄，累计达 1 万上限即全屏渲染失败）。
+                            if (hOldBitmap != IntPtr.Zero)
+                            {
+                                try { Gdi32.SelectObject(hdcMem, hOldBitmap); } catch { }
+                            }
                             Gdi32.DeleteObject(hBitmap);
                         }
                     }

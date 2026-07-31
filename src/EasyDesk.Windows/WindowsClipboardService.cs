@@ -270,14 +270,10 @@ namespace EasyDesk.Windows
 
         private static bool IsClipboardFormatAvailable(uint format)
         {
-            // Try up to 10 times with 50ms delay — clipboard may be locked by another app
-            for (int i = 0; i < 10; i++)
-            {
-                if (User32.IsClipboardFormatAvailable(format))
-                    return true;
-                System.Threading.Thread.Sleep(50);
-            }
-            return false;
+            // IsClipboardFormatAvailable 是 O(1) 即时查询、与剪贴板锁无关：
+            // 旧实现错误地重试 10×50ms，非文本剪贴板时 GetText() 阻塞半秒，
+            // 造成捕获循环延迟尖峰。单次调用即返回。
+            return User32.IsClipboardFormatAvailable(format);
         }
 
         /// <summary>
@@ -292,9 +288,8 @@ namespace EasyDesk.Windows
                 if (User32.OpenClipboard(hWndOwner))
                     return true;
                 // Win32 error 5 = ACCESS_DENIED (clipboard locked by another process)
-                // Win32 error 0 = success (shouldn't happen if return is false, but just in case)
                 int error = Marshal.GetLastWin32Error();
-                if (error != 5 && error != 0)
+                if (error != 5)
                     return false; // Other errors don't benefit from retry
                 System.Threading.Thread.Sleep(50);
             }

@@ -16,8 +16,9 @@ namespace EasyDesk.Windows
 
         public IScreenCapturer CreateScreenCapturer()
         {
-#if NET40
-            // Win8+ (6.2+) 优先使用 DXGI Desktop Duplication
+            // Win8+ (6.2+) 优先使用 DXGI Desktop Duplication（net40/netstandard2.0 均启用）。
+            // DXGI 直接从 GPU 读桌面，1-5ms/帧；GDI BitBlt 在 Aero 下 30-50ms/帧，
+            // 是远程桌面延迟的主要来源之一。XP 无 DXGI，回退 BitBlt。
             if (Environment.OSVersion.Version.Major > 6 ||
                 (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor >= 2))
             {
@@ -31,19 +32,18 @@ namespace EasyDesk.Windows
                     // DXGI 初始化失败（如无 GPU、远程桌面等），降级到 BitBlt
                 }
             }
-#endif
             return new WindowsScreenCapturer();
         }
 
         /// <summary>
         /// 创建最佳的视频编码器。
-        /// Win7+ → H.264 MediaFoundation 硬件编码；回退 → Baseline (Zlib/JPEG)
+        /// Win8+ → H.264 MediaFoundation 硬件编码（Win7 无 MF H.264 MFT）；回退 → Baseline
         /// </summary>
         public IVideoEncoder CreateVideoEncoder()
         {
 #if NET40
             if (Environment.OSVersion.Version.Major > 6 ||
-                (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor >= 1))
+                (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor >= 2))
             {
                 try
                 {
