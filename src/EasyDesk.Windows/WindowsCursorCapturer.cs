@@ -130,6 +130,86 @@ namespace EasyDesk.Windows
                         int totalBytes = (andStride + xorStride) * height;
                         var imageData = new byte[totalBytes];
 
+                        // —— 单色光标（hbmColor=NULL，hbmMask 双倍高 2*height）——
+                        // 上半 = AND 掩码，下半 = XOR 掩码（1bpp）。
+                        // 经典单色光标语义：AND=1/XOR=1 → 白；AND=1/XOR=0 → 黑；
+                        // AND=0/XOR=1 → 反色（近似为白）；AND=0/XOR=0 → 透明。
+                        // 统一转换为带 alpha 的 BGRA（AND 段全 0，透明由 alpha 承载）。
+                        // 旧实现把上半区同时当作 AND/XOR 读取，并按彩色光标语义（AND=1=透明）处理，
+                        // 导致 I 形等单色光标整幅变透明 → 客户端编辑时看不到光标。
+                        if (!hasColor)
+                        {
+                            int maskHeight = fullHeight; // 2 * height
+                            var bmiMask = new BITMAPINFO();
+                            bmiMask.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                            bmiMask.bmiHeader.biWidth = width;
+                            bmiMask.bmiHeader.biHeight = -maskHeight;
+                            bmiMask.bmiHeader.biPlanes = 1;
+                            bmiMask.bmiHeader.biBitCount = 32;
+                            bmiMask.bmiHeader.biCompression = Win32Constants.BI_RGB;
+
+                            int maskSize = width * 4 * maskHeight;
+                            IntPtr maskBuffer = Marshal.AllocHGlobal(maskSize);
+                            try
+                            {
+                                int maskLines = Gdi32.GetDIBits(hdc, ii.hbmMask, 0, (uint)maskHeight,
+                                    maskBuffer, ref bmiMask, Win32Constants.DIB_RGB_COLORS);
+                                if (maskLines == 0)
+                                {
+                                    return new CursorInfo
+                                    {
+                                        X = x, Y = y,
+                                        HotspotX = hotspotX, HotspotY = hotspotY,
+                                        Width = 0, Height = 0,
+                                        ImageData = new byte[0]
+                                    };
+                                }
+
+                                for (int row = 0; row < height; row++)
+                                {
+                                    int destOffset = (andStride * height) + row * xorStride;
+                                    for (int col = 0; col < width; col++)
+                                    {
+                                        bool andBit = ReadMaskBit(maskBuffer, row, col, width);
+                                        bool xorBit = ReadMaskBit(maskBuffer, height + row, col, width);
+                                        int off = destOffset + col * 4;
+                                        if (andBit && xorBit)
+                                        {
+                                            imageData[off] = 255; imageData[off + 1] = 255;
+                                            imageData[off + 2] = 255; imageData[off + 3] = 255; // 白
+                                        }
+                                        else if (andBit)
+                                        {
+                                            imageData[off] = 0; imageData[off + 1] = 0;
+                                            imageData[off + 2] = 0; imageData[off + 3] = 255; // 黑
+                                        }
+                                        else if (xorBit)
+                                        {
+                                            imageData[off] = 255; imageData[off + 1] = 255;
+                                            imageData[off + 2] = 255; imageData[off + 3] = 255; // 反色近似白
+                                        }
+                                        else
+                                        {
+                                            imageData[off] = 0; imageData[off + 1] = 0;
+                                            imageData[off + 2] = 0; imageData[off + 3] = 0; // 透明
+                                        }
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                Marshal.FreeHGlobal(maskBuffer);
+                            }
+
+                            return new CursorInfo
+                            {
+                                X = x, Y = y,
+                                HotspotX = hotspotX, HotspotY = hotspotY,
+                                Width = width, Height = height,
+                                ImageData = imageData
+                            };
+                        }
+
                         // 读 XOR 掩码（32bpp top-down DIB，行 0 在顶）
                         var bmiXor = new BITMAPINFO();
                         bmiXor.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
@@ -250,6 +330,12 @@ namespace EasyDesk.Windows
                 if (ii.hbmMask != IntPtr.Zero) Gdi32.DeleteObject(ii.hbmMask);
                 if (ii.hbmColor != IntPtr.Zero) Gdi32.DeleteObject(ii.hbmColor);
             }
+        }
+        /// <summary>读取 32bpp 掩码缓冲中 (row, col) 的位（1bpp 位转 32bpp 后 B 通道 != 0 表示 1）。</summary>
+        private static bool ReadMaskBit(IntPtr buffer, int row, int col, int width)
+        {
+            int offset = row * width * 4 + col * 4;
+            return Marshal.ReadByte(buffer, offset) != 0;
         }
     }
 }
