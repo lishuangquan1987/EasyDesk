@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using EasyDesk.Core;
 using EasyDesk.Core.Models;
@@ -15,6 +16,12 @@ namespace EasyDesk.Windows
         private static readonly int InputStructSize = Marshal.SizeOf(typeof(INPUT));
         // SendInput 进程级共享，多会话并发调用非线程安全；串行化所有注入。
         private static readonly object SendLock = new object();
+        // 主屏原点缓存：显示器布局变化不频繁，避免每次鼠标移动都枚举显示器
+        private static readonly object PrimaryOriginLock = new object();
+        private static int _cachedPrimaryX;
+        private static int _cachedPrimaryY;
+        private static long _primaryOriginCacheTicks;
+        private static readonly long PrimaryOriginCacheWindow = 2 * Stopwatch.Frequency;
 
         /// <summary>
         /// Send a single INPUT and throw if it fails.
@@ -51,9 +58,15 @@ namespace EasyDesk.Windows
                 int virtualY = User32.GetSystemMetrics(Win32Constants.SM_YVIRTUALSCREEN);
                 int virtualW = User32.GetSystemMetrics(Win32Constants.SM_CXVIRTUALSCREEN);
                 int virtualH = User32.GetSystemMetrics(Win32Constants.SM_CYVIRTUALSCREEN);
+                // 客户端发送的是主屏相对坐标（0..主屏宽/高），需先换算为虚拟桌面绝对坐标。
+                // 旧实现直接 (x - virtualX)，把主屏相对坐标当虚拟桌面坐标，
+                // 主屏不在虚拟桌面原点（如主屏右侧、上方有副屏）时光标整体偏移。
+                int primaryX;
+                int primaryY;
+                GetPrimaryOrigin(out primaryX, out primaryY);
                 // 用 (范围-1) 做除数让最右/最下像素可达（dx=65535）
-                input.mkhi.mi.dx = ((x - virtualX) * 65535) / Math.Max(virtualW - 1, 1);
-                input.mkhi.mi.dy = ((y - virtualY) * 65535) / Math.Max(virtualH - 1, 1);
+                input.mkhi.mi.dx = ((primaryX + x - virtualX) * 65535) / Math.Max(virtualW - 1, 1);
+                input.mkhi.mi.dy = ((primaryY + y - virtualY) * 65535) / Math.Max(virtualH - 1, 1);
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.VirtualDesk;
             }
@@ -66,6 +79,53 @@ namespace EasyDesk.Windows
             input.mkhi.mi.dwExtraInfo = IntPtr.Zero;
 
             SendInputChecked(input, "mouse move");
+        }
+
+        /// <summary>
+        /// 获取主显示器原点在虚拟桌面内的坐标（带 2 秒缓存）。
+        /// 副屏可位于主屏左侧/上方，主屏原点不总在虚拟桌面 (0,0)。
+        /// </summary>
+        private static void GetPrimaryOrigin(out int primaryX, out int primaryY)
+        {
+            // 使用单调时钟（Stopwatch）做缓存过期，避免系统时间调整影响缓存窗口
+            long now = Stopwatch.GetTimestamp();
+            lock (PrimaryOriginLock)
+            {
+                if (_primaryOriginCacheTicks != 0
+                    && (now - _primaryOriginCacheTicks) < PrimaryOriginCacheWindow)
+                {
+                    primaryX = _cachedPrimaryX;
+                    primaryY = _cachedPrimaryY;
+                    return;
+                }
+            }
+
+            primaryX = 0;
+            primaryY = 0;
+            try
+            {
+                DesktopBounds[] screens = new WindowsScreenCapturer().GetAllScreens();
+                foreach (DesktopBounds s in screens)
+                {
+                    if (s.IsPrimary)
+                    {
+                        primaryX = s.X;
+                        primaryY = s.Y;
+                        break;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // 枚举失败时按 (0,0) 处理（单显示器默认），不影响正常路径
+            }
+
+            lock (PrimaryOriginLock)
+            {
+                _cachedPrimaryX = primaryX;
+                _cachedPrimaryY = primaryY;
+                _primaryOriginCacheTicks = now;
+            }
         }
 
         public void SendMouseButton(MouseButton button, bool down)

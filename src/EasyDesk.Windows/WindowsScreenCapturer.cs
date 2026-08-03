@@ -13,6 +13,9 @@ namespace EasyDesk.Windows
     /// </summary>
     public class WindowsScreenCapturer : IScreenCapturer
     {
+        // 枚举显示器使用无状态复用实例，避免捕获热路径（~60fps）每次分配新对象
+        private static readonly WindowsScreenCapturer EnumerationInstance = new WindowsScreenCapturer();
+
         public ScreenFrame CaptureScreen()
         {
             return CaptureScreen(CaptureOptions.Default);
@@ -215,22 +218,50 @@ namespace EasyDesk.Windows
                 y = User32.GetSystemMetrics(Win32Constants.SM_YVIRTUALSCREEN);
                 width = User32.GetSystemMetrics(Win32Constants.SM_CXVIRTUALSCREEN);
                 height = User32.GetSystemMetrics(Win32Constants.SM_CYVIRTUALSCREEN);
+                return;
             }
-            else
-            {
-                // Specific monitor by index
-                var screens = new WindowsScreenCapturer().GetAllScreens();
-                if (targetDisplay >= screens.Length)
-                    throw new ArgumentOutOfRangeException(
-                        string.Format("Monitor index {0} out of range (found {1} monitors).",
-                            targetDisplay, screens.Length));
 
-                var screen = screens[targetDisplay];
-                x = screen.X;
-                y = screen.Y;
-                width = screen.Width;
-                height = screen.Height;
+            DesktopBounds[] screens = EnumerationInstance.GetAllScreens();
+
+            // 0 = primary monitor：EnumDisplayMonitors 的枚举顺序不保证主屏在前，
+            // 必须按 MONITORINFOF_PRIMARY 显式查找，否则多显示器时捕获到副屏。
+            if (targetDisplay == 0)
+            {
+                foreach (DesktopBounds s in screens)
+                {
+                    if (s.IsPrimary)
+                    {
+                        x = s.X;
+                        y = s.Y;
+                        width = s.Width;
+                        height = s.Height;
+                        return;
+                    }
+                }
+                throw new ArgumentOutOfRangeException("Primary monitor not found");
             }
+
+            // 1, 2, ... = 第 (targetDisplay-1) 个副屏（按枚举顺序，主屏不计入）
+            int secondarySeen = 0;
+            int secondaryIndex = targetDisplay - 1;
+            foreach (DesktopBounds s in screens)
+            {
+                if (!s.IsPrimary)
+                {
+                    if (secondarySeen == secondaryIndex)
+                    {
+                        x = s.X;
+                        y = s.Y;
+                        width = s.Width;
+                        height = s.Height;
+                        return;
+                    }
+                    secondarySeen++;
+                }
+            }
+            throw new ArgumentOutOfRangeException(
+                string.Format("Monitor index {0} out of range (found {1} secondary monitors).",
+                    targetDisplay, secondarySeen));
         }
     }
 }
