@@ -78,6 +78,83 @@ namespace EasyDesk.Windows.Tests
         }
 
         [Fact]
+        public void CaptureScaled_ShouldReturnScaledFrame()
+        {
+            var capturer = _factory.CreateScreenCapturer();
+            ScreenFrame frame = null;
+            try
+            {
+                var primary = capturer.GetPrimaryScreen();
+                frame = capturer.CaptureScaled(
+                    primary.X, primary.Y, primary.Width, primary.Height, 640, 360);
+                Assert.Equal(640, frame.Width);
+                Assert.Equal(360, frame.Height);
+                Assert.Equal(2560, frame.Stride); // 640 * 4
+                Assert.NotEqual(IntPtr.Zero, frame.Scan0);
+                Assert.Equal(0, frame.PixelFormat); // BGRA32
+            }
+            finally
+            {
+                if (frame != null && frame.Scan0 != IntPtr.Zero)
+                    Marshal.FreeHGlobal(frame.Scan0);
+            }
+        }
+
+        [Fact]
+        public void CaptureScaled_SameSizeAsSource_ShouldReturnFrame()
+        {
+            var capturer = _factory.CreateScreenCapturer();
+            ScreenFrame frame = null;
+            try
+            {
+                var primary = capturer.GetPrimaryScreen();
+                frame = capturer.CaptureScaled(
+                    primary.X, primary.Y, primary.Width, primary.Height,
+                    primary.Width, primary.Height);
+                Assert.Equal(primary.Width, frame.Width);
+                Assert.Equal(primary.Height, frame.Height);
+            }
+            finally
+            {
+                if (frame != null && frame.Scan0 != IntPtr.Zero)
+                    Marshal.FreeHGlobal(frame.Scan0);
+            }
+        }
+
+        [Fact]
+        public void CaptureScaled_GdiStretchBltPath_ShouldReturnScaledFrame()
+        {
+            // 直接测 WindowsScreenCapturer 的 GDI StretchBlt 路径（Win7 弱机实际使用）
+            var capturer = new WindowsScreenCapturer();
+            ScreenFrame frame = null;
+            try
+            {
+                var primary = capturer.GetPrimaryScreen();
+                frame = capturer.CaptureScaled(
+                    primary.X, primary.Y, primary.Width, primary.Height, 640, 360);
+                Assert.Equal(640, frame.Width);
+                Assert.Equal(360, frame.Height);
+                Assert.Equal(2560, frame.Stride); // 640 * 4
+                Assert.NotEqual(IntPtr.Zero, frame.Scan0);
+            }
+            finally
+            {
+                if (frame != null && frame.Scan0 != IntPtr.Zero)
+                    Marshal.FreeHGlobal(frame.Scan0);
+            }
+        }
+
+        [Fact]
+        public void CaptureScaled_InvalidTargetSize_ShouldThrow()
+        {
+            var capturer = _factory.CreateScreenCapturer();
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => capturer.CaptureScaled(0, 0, 100, 100, 0, 100));
+            Assert.Throws<ArgumentOutOfRangeException>(
+                () => capturer.CaptureScaled(0, 0, 100, 100, 100, 0));
+        }
+
+        [Fact]
         public void CaptureRegion_InvalidSize_ShouldThrow()
         {
             var capturer = _factory.CreateScreenCapturer();

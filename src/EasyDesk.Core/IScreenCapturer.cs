@@ -27,6 +27,15 @@ namespace EasyDesk.Core
         ScreenFrame CaptureRegion(int x, int y, int width, int height);
 
         /// <summary>
+        /// Capture a rectangular region of the virtual desktop, scaled to the given
+        /// target size during capture (GDI StretchBlt on the Windows implementation).
+        /// Avoids a full-resolution pixel buffer and a separate managed downscale on
+        /// the encode path, which dominates per-frame latency on weak CPUs.
+        /// The caller MUST free the returned ScreenFrame.Scan0 via Marshal.FreeHGlobal.
+        /// </summary>
+        ScreenFrame CaptureScaled(int x, int y, int width, int height, int targetWidth, int targetHeight);
+
+        /// <summary>
         /// Get the primary monitor bounds.
         /// </summary>
         DesktopBounds GetPrimaryScreen();

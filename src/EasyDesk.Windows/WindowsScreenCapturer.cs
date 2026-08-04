@@ -49,6 +49,139 @@ namespace EasyDesk.Windows
             return CaptureRegionInternal(x, y, width, height);
         }
 
+        /// <summary>
+        /// Captures the given desktop region scaled to targetWidth x targetHeight.
+        /// StretchBlt performs the scaling inside GDI, so the caller avoids a
+        /// full-resolution pixel buffer and the managed downscale pass that used to
+        /// run on the encode thread (the dominant per-frame cost on Win7 32-bit).
+        /// </summary>
+        public ScreenFrame CaptureScaled(int x, int y, int width, int height, int targetWidth, int targetHeight)
+        {
+            if (width <= 0) throw new ArgumentOutOfRangeException("width");
+            if (height <= 0) throw new ArgumentOutOfRangeException("height");
+            if (targetWidth <= 0) throw new ArgumentOutOfRangeException("targetWidth");
+            if (targetHeight <= 0) throw new ArgumentOutOfRangeException("targetHeight");
+
+            return CaptureRegionScaledInternal(x, y, width, height, targetWidth, targetHeight);
+        }
+
+        private ScreenFrame CaptureRegionScaledInternal(
+            int x, int y, int width, int height, int targetWidth, int targetHeight)
+        {
+            int stride = targetWidth * 4;
+            int totalBytes = stride * targetHeight;
+            IntPtr pixelBuffer = Marshal.AllocHGlobal(totalBytes);
+            if (pixelBuffer == IntPtr.Zero)
+                throw new OutOfMemoryException("Failed to allocate pixel buffer for scaled screen capture.");
+
+            try
+            {
+                IntPtr hdcScreen = User32.GetDC(IntPtr.Zero);
+                if (hdcScreen == IntPtr.Zero)
+                    throw new InvalidOperationException("GetDC returned null.");
+
+                try
+                {
+                    IntPtr hdcMem = Gdi32.CreateCompatibleDC(hdcScreen);
+                    if (hdcMem == IntPtr.Zero)
+                        throw new InvalidOperationException("CreateCompatibleDC failed.");
+
+                    try
+                    {
+                        IntPtr hOldBitmap = IntPtr.Zero;
+                        IntPtr hBitmap = Gdi32.CreateCompatibleBitmap(hdcScreen, targetWidth, targetHeight);
+                        if (hBitmap == IntPtr.Zero)
+                            throw new InvalidOperationException("CreateCompatibleBitmap failed.");
+
+                        try
+                        {
+                            hOldBitmap = Gdi32.SelectObject(hdcMem, hBitmap);
+                            if (hOldBitmap == IntPtr.Zero)
+                            {
+                                var selError = Marshal.GetLastWin32Error();
+                                throw new InvalidOperationException(
+                                    string.Format("SelectObject failed. Win32 error: {0}", selError));
+                            }
+
+                            // COLORONCOLOR = fastest stretch mode; screen content is
+                            // downscaled during the blit, not in a second pass.
+                            int prevStretchMode = Gdi32.SetStretchBltMode(
+                                hdcMem, Win32Constants.STRETCH_COLORONCOLOR);
+                            if (prevStretchMode == 0)
+                            {
+                                var smError = Marshal.GetLastWin32Error();
+                                throw new InvalidOperationException(
+                                    string.Format("SetStretchBltMode failed. Win32 error: {0}", smError));
+                            }
+
+                            uint rop = Win32Constants.SRCCOPY | Win32Constants.CAPTUREBLT;
+                            bool stretchOk = Gdi32.StretchBlt(
+                                hdcMem, 0, 0, targetWidth, targetHeight,
+                                hdcScreen, x, y, width, height, rop);
+
+                            if (!stretchOk)
+                            {
+                                var error = Marshal.GetLastWin32Error();
+                                throw new InvalidOperationException(
+                                    string.Format("StretchBlt failed. Win32 error: {0}", error));
+                            }
+
+                            // Get pixel data via GetDIBits at the target size
+                            var bmi = new BITMAPINFO();
+                            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                            bmi.bmiHeader.biWidth = targetWidth;
+                            bmi.bmiHeader.biHeight = -targetHeight; // negative = top-down
+                            bmi.bmiHeader.biPlanes = 1;
+                            bmi.bmiHeader.biBitCount = 32;
+                            bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
+                            bmi.bmiHeader.biSizeImage = (uint)totalBytes;
+
+                            int result = Gdi32.GetDIBits(
+                                hdcMem, hBitmap, 0, (uint)targetHeight,
+                                pixelBuffer, ref bmi, Win32Constants.DIB_RGB_COLORS);
+
+                            if (result == 0)
+                            {
+                                var error = Marshal.GetLastWin32Error();
+                                throw new InvalidOperationException(
+                                    string.Format("GetDIBits failed. Win32 error: {0}", error));
+                            }
+                        }
+                        finally
+                        {
+                            if (hOldBitmap != IntPtr.Zero)
+                            {
+                                try { Gdi32.SelectObject(hdcMem, hOldBitmap); } catch { }
+                            }
+                            Gdi32.DeleteObject(hBitmap);
+                        }
+                    }
+                    finally
+                    {
+                        Gdi32.DeleteDC(hdcMem);
+                    }
+                }
+                finally
+                {
+                    User32.ReleaseDC(IntPtr.Zero, hdcScreen);
+                }
+
+                return new ScreenFrame
+                {
+                    Scan0 = pixelBuffer,
+                    Width = targetWidth,
+                    Height = targetHeight,
+                    Stride = stride,
+                    PixelFormat = 0
+                };
+            }
+            catch
+            {
+                Marshal.FreeHGlobal(pixelBuffer);
+                throw;
+            }
+        }
+
         private ScreenFrame CaptureRegionInternal(int x, int y, int width, int height)
         {
             int stride = width * 4;

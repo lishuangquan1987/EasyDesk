@@ -168,6 +168,9 @@ namespace EasyDesk.Windows.NativeMethods
         public const uint SRCCOPY = 0x00CC0020;
         public const uint CAPTUREBLT = 0x40000000;
 
+        // StretchBlt stretch mode: COLORONCOLOR (fastest, nearest-neighbor sampling)
+        public const int STRETCH_COLORONCOLOR = 3;
+
         // DIB colors
         public const uint DIB_RGB_COLORS = 0;
         public const uint BI_RGB = 0;

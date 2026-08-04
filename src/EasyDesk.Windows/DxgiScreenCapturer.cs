@@ -270,6 +270,99 @@ namespace EasyDesk.Windows
             }
         }
 
+        /// <summary>
+        /// Captures the given region scaled to targetWidth x targetHeight.
+        /// DXGI captures at full resolution and the downscale is done with a fast
+        /// bilinear pass (only used on Windows 8+ machines where CPU is fast;
+        /// Windows 7 falls back to WindowsScreenCapturer.StretchBlt path).
+        /// </summary>
+        public ScreenFrame CaptureScaled(int x, int y, int width, int height, int targetWidth, int targetHeight)
+        {
+            if (width <= 0) throw new ArgumentOutOfRangeException("width");
+            if (height <= 0) throw new ArgumentOutOfRangeException("height");
+            if (targetWidth <= 0) throw new ArgumentOutOfRangeException("targetWidth");
+            if (targetHeight <= 0) throw new ArgumentOutOfRangeException("targetHeight");
+
+            var full = CaptureRegion(x, y, width, height);
+            if (full.Scan0 == IntPtr.Zero)
+                return full;
+
+            if (full.Width == targetWidth && full.Height == targetHeight)
+                return full;
+
+            try
+            {
+                return DownscaleFrame(full, targetWidth, targetHeight);
+            }
+            finally
+            {
+                // DownscaleFrame 内部已把源像素拷入托管数组（成功或失败都一样），
+                // 这里统一释放源缓冲，保证只释放一次，避免双重释放导致堆损坏
+                Marshal.FreeHGlobal(full.Scan0);
+            }
+        }
+
+        /// <summary>
+        /// Bilinear downscale of a captured BGRA32 frame. Returns a new buffer of
+        /// targetWidth x targetHeight; the caller remains owner of the source buffer
+        /// and must free it (CaptureScaled does so in a finally block).
+        /// </summary>
+        private static ScreenFrame DownscaleFrame(ScreenFrame src, int targetWidth, int targetHeight)
+        {
+            int srcStride = src.Width * 4;
+            byte[] srcBytes = new byte[srcStride * src.Height];
+            Marshal.Copy(src.Scan0, srcBytes, 0, srcBytes.Length);
+
+            int dstStride = targetWidth * 4;
+            byte[] dstBytes = new byte[dstStride * targetHeight];
+
+            for (int dy = 0; dy < targetHeight; dy++)
+            {
+                double syf = ((double)dy + 0.5) * src.Height / targetHeight - 0.5;
+                if (syf < 0) syf = 0;
+                int sy0 = (int)syf;
+                int sy1 = sy0 + 1 < src.Height ? sy0 + 1 : sy0;
+                double fy = syf - sy0;
+
+                for (int dx = 0; dx < targetWidth; dx++)
+                {
+                    double sxf = ((double)dx + 0.5) * src.Width / targetWidth - 0.5;
+                    if (sxf < 0) sxf = 0;
+                    int sx0 = (int)sxf;
+                    int sx1 = sx0 + 1 < src.Width ? sx0 + 1 : sx0;
+                    double fx = sxf - sx0;
+
+                    int r0 = sy0 * srcStride + sx0 * 4;
+                    int r1 = sy1 * srcStride + sx0 * 4;
+                    int r2 = sy0 * srcStride + sx1 * 4;
+                    int r3 = sy1 * srcStride + sx1 * 4;
+
+                    int d = (dy * dstStride) + (dx * 4);
+                    for (int c = 0; c < 4; c++)
+                    {
+                        double top = srcBytes[r0 + c] * (1 - fx) + srcBytes[r2 + c] * fx;
+                        double bottom = srcBytes[r1 + c] * (1 - fx) + srcBytes[r3 + c] * fx;
+                        int value = (int)(top * (1 - fy) + bottom * fy + 0.5);
+                        if (value < 0) value = 0;
+                        if (value > 255) value = 255;
+                        dstBytes[d + c] = (byte)value;
+                    }
+                }
+            }
+
+            IntPtr dstPtr = Marshal.AllocHGlobal(dstBytes.Length);
+            Marshal.Copy(dstBytes, 0, dstPtr, dstBytes.Length);
+
+            return new ScreenFrame
+            {
+                Scan0 = dstPtr,
+                Width = targetWidth,
+                Height = targetHeight,
+                Stride = dstStride,
+                PixelFormat = 0
+            };
+        }
+
         public DesktopBounds GetPrimaryScreen()
         {
             return new DesktopBounds

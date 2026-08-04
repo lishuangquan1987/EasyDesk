@@ -35,6 +35,26 @@ namespace EasyDesk.Windows.NativeMethods
             int nXSrc, int nYSrc,
             uint dwRop);
 
+        /// <summary>
+        /// Copies a rectangle from the source DC to the destination DC with scaling.
+        /// Used to capture the screen directly at the encode resolution, avoiding a
+        /// full-resolution pixel buffer plus a slow managed downscale.
+        /// </summary>
+        [DllImport(DllName)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool StretchBlt(
+            IntPtr hdcDest,
+            int nXOriginDest, int nYOriginDest,
+            int nWidthDest, int nHeightDest,
+            IntPtr hdcSrc,
+            int nXOriginSrc, int nYOriginSrc,
+            int nWidthSrc, int nHeightSrc,
+            uint dwRop);
+
+        /// <summary>Sets the stretching mode of a DC (COLORONCOLOR = fastest).</summary>
+        [DllImport(DllName)]
+        public static extern int SetStretchBltMode(IntPtr hdc, int iStretchMode);
+
         [DllImport(DllName)]
         public static extern int GetDIBits(
             IntPtr hdc,
