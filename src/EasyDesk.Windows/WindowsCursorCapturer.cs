@@ -7,11 +7,64 @@ using EasyDesk.Windows.NativeMethods;
 namespace EasyDesk.Windows
 {
     /// <summary>
-    /// Windows cursor capturer using GetCursorInfo / GetIconInfo.
-    /// Thread-safe — read-only, no shared mutable state.
+    /// Windows cursor capturer using GetCursorInfo / GetIconInfo / DrawIconEx.
+    ///
+    /// 性能设计（弱机 XP 单核关键路径）：
+    /// 光标形状按光标句柄（hCursor）缓存 —— 60Hz 轮询只做一次 GetCursorInfo（极轻），
+    /// 仅当 hCursor 变化（形状切换/动画帧）时才执行一次 DrawIconEx 渲染。
+    /// 旧实现每次轮询都 GetIconInfo + 2×GetDIBits + 逐字节 Marshal.ReadByte
+    /// （32×32 光标约 6000 次 P/Invoke），单核 XP 虚拟机上实测把整机 CPU 吃满、
+    /// 并因 GDI 串行化拖垮屏幕捕获（捕获仅 ~1.7 FPS）。
+    ///
+    /// 正确性设计（修复“光标矩形黑框”）：
+    /// 光标形状改用 DrawIconEx 渲染到清零的 32bpp DIB section，GDI 按光标自身
+    /// 掩码/alpha 合成出正确的 BGRA（含透明度）。旧实现直接 GetDIBits 读取
+    /// hbmColor DDB —— DDB 无 alpha 通道，虚拟机显示驱动回读的 alpha 字节是
+    /// 未定义垃圾值（常见 0xFF），客户端把透明背景涂成不透明黑 → 黑框。
+    /// 渲染结果按 alpha==0 推导出等价的 1bpp AND 掩码，保持 [AND|XOR] 线格式
+    /// 与客户端合成逻辑完全兼容。
+    ///
+    /// 线程安全：GetCursorInfo 内部有锁（形状缓存与 DIB 复用）。调用方通常
+    /// 是单轮询线程，锁开销可忽略。
     /// </summary>
     public class WindowsCursorCapturer : ICursorCapturer
     {
+        // ── 形状缓存（key = 光标句柄）──
+        private readonly object _cacheLock = new object();
+        private IntPtr _cachedHandle;
+        private int _cachedWidth;
+        private int _cachedHeight;
+        private int _cachedHotX;
+        private int _cachedHotY;
+        private byte[] _cachedImageData;
+
+        // ── DrawIconEx 渲染用的缓存 32bpp DIB section ──
+        private IntPtr _dibDc;
+        private IntPtr _dibBitmap;
+        private IntPtr _dibBuffer;
+        private IntPtr _dibOldObject;
+        private int _dibW;
+        private int _dibH;
+        private byte[] _dibZeroes;
+        private bool _dibReady;
+
+        /// <summary>
+        /// 把 GetIconInfo 返回的掩码位图全部释放（调用方职责）。
+        /// </summary>
+        private static void DestroyIconBitmaps(ICONINFO ii)
+        {
+            if (ii.hbmMask != IntPtr.Zero)
+            {
+                Gdi32.DeleteObject(ii.hbmMask);
+                ii.hbmMask = IntPtr.Zero;
+            }
+            if (ii.hbmColor != IntPtr.Zero)
+            {
+                Gdi32.DeleteObject(ii.hbmColor);
+                ii.hbmColor = IntPtr.Zero;
+            }
+        }
+
         public void GetCursorPosition(out int x, out int y)
         {
             POINT pt;
@@ -56,286 +109,239 @@ namespace EasyDesk.Windows
                 };
             }
 
-            ICONINFO ii;
-            if (!User32.GetIconInfo(ci.hCursor, out ii))
+            lock (_cacheLock)
             {
-                return new CursorInfo
+                // 缓存命中：光标句柄未变，直接复用形状（仅位置更新）。
+                // 这是 60Hz 轮询的热路径 —— 一次 GetCursorInfo API 即返回。
+                if (ci.hCursor == _cachedHandle && _cachedImageData != null)
                 {
-                    X = x, Y = y,
-                    HotspotX = 0, HotspotY = 0,
-                    Width = 0, Height = 0,
-                    ImageData = new byte[0]
-                };
-            }
+                    return new CursorInfo
+                    {
+                        X = x, Y = y,
+                        HotspotX = _cachedHotX, HotspotY = _cachedHotY,
+                        Width = _cachedWidth, Height = _cachedHeight,
+                        ImageData = _cachedImageData
+                    };
+                }
 
-            try
-            {
-                int hotspotX = ii.xHotspot;
-                int hotspotY = ii.yHotspot;
-                int width = 0;
-                int height = 0;
-                int andStride = 0;
-
-                // 光标类型判定（Win32 ICONINFO 约定）：
-                // - 颜色光标（现代 Windows 桌面默认箭头带阴影即属此类）：hbmColor=颜色 XOR
-                //   位图（高度=光标高），hbmMask=仅 AND 掩码（高度=光标高）。
-                // - 黑白光标：hbmColor=NULL，hbmMask=AND+XOR 双倍高（上半 AND、下半 XOR）。
-                // 旧实现无条件对高度 /2 且只读 hbmMask，颜色光标被当成黑白光标处理，
-                // 抓出来的是半高 + 错位像素（默认箭头即垃圾数据）。
-                bool hasColor = ii.hbmColor != IntPtr.Zero;
-                IntPtr xorBitmap = hasColor ? ii.hbmColor : ii.hbmMask;
-
-                if (xorBitmap != IntPtr.Zero)
+                // 形状变化（或首次）：执行一次重渲染
+                ICONINFO ii;
+                if (!User32.GetIconInfo(ci.hCursor, out ii))
                 {
-                    IntPtr hdc = User32.GetDC(IntPtr.Zero);
-                    if (hdc == IntPtr.Zero)
+                    return new CursorInfo
+                    {
+                        X = x, Y = y,
+                        HotspotX = 0, HotspotY = 0,
+                        Width = 0, Height = 0,
+                        ImageData = new byte[0]
+                    };
+                }
+
+                try
+                {
+                    int width;
+                    int height;
+                    byte[] imageData;
+                    if (!TryRenderCursorShape(ci.hCursor, ii, out imageData, out width, out height))
                     {
                         return new CursorInfo
                         {
                             X = x, Y = y,
-                            HotspotX = hotspotX, HotspotY = hotspotY,
+                            HotspotX = 0, HotspotY = 0,
                             Width = 0, Height = 0,
                             ImageData = new byte[0]
                         };
                     }
-                    try
+
+                    _cachedHandle = ci.hCursor;
+                    _cachedHotX = ii.xHotspot;
+                    _cachedHotY = ii.yHotspot;
+                    _cachedWidth = width;
+                    _cachedHeight = height;
+                    _cachedImageData = imageData;
+
+                    return new CursorInfo
                     {
-                        // 查询位图尺寸（XOR 源位图）
-                        var bmiQuery = new BITMAPINFO();
-                        bmiQuery.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                        bmiQuery.bmiHeader.biBitCount = 0;
-
-                        Gdi32.GetDIBits(
-                            hdc, xorBitmap, 0, 0, IntPtr.Zero, ref bmiQuery, Win32Constants.DIB_RGB_COLORS);
-
-                        width = Math.Abs(bmiQuery.bmiHeader.biWidth);
-                        int fullHeight = Math.Abs(bmiQuery.bmiHeader.biHeight);
-                        // 颜色光标：hbmColor 高度即光标高；黑白光标：hbmMask 双倍高
-                        height = hasColor ? fullHeight : fullHeight / 2;
-                        andStride = ((width + 15) / 16) * 2; // 1bpp, 2-byte aligned
-
-                        if (width == 0 || height == 0)
-                        {
-                            return new CursorInfo
-                            {
-                                X = x, Y = y,
-                                HotspotX = hotspotX, HotspotY = hotspotY,
-                                Width = 0, Height = 0,
-                                ImageData = new byte[0]
-                            };
-                        }
-
-                        // Build composite image: AND mask (1bpp) + XOR mask (BGRA32)
-                        int xorStride = width * 4;
-                        int totalBytes = (andStride + xorStride) * height;
-                        var imageData = new byte[totalBytes];
-
-                        // —— 单色光标（hbmColor=NULL，hbmMask 双倍高 2*height）——
-                        // 上半 = AND 掩码，下半 = XOR 掩码（1bpp）。
-                        // 经典单色光标语义：AND=1/XOR=1 → 白；AND=1/XOR=0 → 黑；
-                        // AND=0/XOR=1 → 反色（近似为白）；AND=0/XOR=0 → 透明。
-                        // 统一转换为带 alpha 的 BGRA（AND 段全 0，透明由 alpha 承载）。
-                        // 旧实现把上半区同时当作 AND/XOR 读取，并按彩色光标语义（AND=1=透明）处理，
-                        // 导致 I 形等单色光标整幅变透明 → 客户端编辑时看不到光标。
-                        if (!hasColor)
-                        {
-                            int maskHeight = fullHeight; // 2 * height
-                            var bmiMask = new BITMAPINFO();
-                            bmiMask.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                            bmiMask.bmiHeader.biWidth = width;
-                            bmiMask.bmiHeader.biHeight = -maskHeight;
-                            bmiMask.bmiHeader.biPlanes = 1;
-                            bmiMask.bmiHeader.biBitCount = 32;
-                            bmiMask.bmiHeader.biCompression = Win32Constants.BI_RGB;
-
-                            int maskSize = width * 4 * maskHeight;
-                            IntPtr maskBuffer = Marshal.AllocHGlobal(maskSize);
-                            try
-                            {
-                                int maskLines = Gdi32.GetDIBits(hdc, ii.hbmMask, 0, (uint)maskHeight,
-                                    maskBuffer, ref bmiMask, Win32Constants.DIB_RGB_COLORS);
-                                if (maskLines == 0)
-                                {
-                                    return new CursorInfo
-                                    {
-                                        X = x, Y = y,
-                                        HotspotX = hotspotX, HotspotY = hotspotY,
-                                        Width = 0, Height = 0,
-                                        ImageData = new byte[0]
-                                    };
-                                }
-
-                                for (int row = 0; row < height; row++)
-                                {
-                                    int destOffset = (andStride * height) + row * xorStride;
-                                    for (int col = 0; col < width; col++)
-                                    {
-                                        bool andBit = ReadMaskBit(maskBuffer, row, col, width);
-                                        bool xorBit = ReadMaskBit(maskBuffer, height + row, col, width);
-                                        int off = destOffset + col * 4;
-                                        if (andBit && xorBit)
-                                        {
-                                            imageData[off] = 255; imageData[off + 1] = 255;
-                                            imageData[off + 2] = 255; imageData[off + 3] = 255; // 白
-                                        }
-                                        else if (andBit)
-                                        {
-                                            imageData[off] = 0; imageData[off + 1] = 0;
-                                            imageData[off + 2] = 0; imageData[off + 3] = 255; // 黑
-                                        }
-                                        else if (xorBit)
-                                        {
-                                            imageData[off] = 255; imageData[off + 1] = 255;
-                                            imageData[off + 2] = 255; imageData[off + 3] = 255; // 反色近似白
-                                        }
-                                        else
-                                        {
-                                            imageData[off] = 0; imageData[off + 1] = 0;
-                                            imageData[off + 2] = 0; imageData[off + 3] = 0; // 透明
-                                        }
-                                    }
-                                }
-                            }
-                            finally
-                            {
-                                Marshal.FreeHGlobal(maskBuffer);
-                            }
-
-                            return new CursorInfo
-                            {
-                                X = x, Y = y,
-                                HotspotX = hotspotX, HotspotY = hotspotY,
-                                Width = width, Height = height,
-                                ImageData = imageData
-                            };
-                        }
-
-                        // 读 XOR 掩码（32bpp top-down DIB，行 0 在顶）
-                        var bmiXor = new BITMAPINFO();
-                        bmiXor.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                        bmiXor.bmiHeader.biWidth = width;
-                        bmiXor.bmiHeader.biHeight = -height;
-                        bmiXor.bmiHeader.biPlanes = 1;
-                        bmiXor.bmiHeader.biBitCount = 32;
-                        bmiXor.bmiHeader.biCompression = Win32Constants.BI_RGB;
-
-                        int xorSize = width * 4 * height;
-                        IntPtr xorBuffer = Marshal.AllocHGlobal(xorSize);
-                        try
-                        {
-                            int xorLines = Gdi32.GetDIBits(hdc, xorBitmap, 0, (uint)height,
-                                xorBuffer, ref bmiXor, Win32Constants.DIB_RGB_COLORS);
-
-                            if (xorLines == 0)
-                            {
-                                return new CursorInfo
-                                {
-                                    X = x, Y = y,
-                                    HotspotX = hotspotX, HotspotY = hotspotY,
-                                    Width = 0, Height = 0,
-                                    ImageData = new byte[0]
-                                };
-                            }
-
-                            // XOR 掩码 → imageData 后半段（每行 andStride 之后的 xorStride 字节）
-                            for (int row = 0; row < height; row++)
-                            {
-                                int destOffset = (andStride * height) + row * xorStride;
-                                int srcOffset = row * width * 4;
-                                for (int col = 0; col < width * 4; col++)
-                                    imageData[destOffset + col] =
-                                        Marshal.ReadByte(xorBuffer, srcOffset + col);
-                            }
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(xorBuffer);
-                        }
-
-                        // 读 AND 掩码：颜色光标读 hbmMask（height 行）；黑白光标读 hbmMask 上半
-                        var bmiAnd = new BITMAPINFO();
-                        bmiAnd.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                        bmiAnd.bmiHeader.biWidth = width;
-                        bmiAnd.bmiHeader.biHeight = -height;
-                        bmiAnd.bmiHeader.biPlanes = 1;
-                        bmiAnd.bmiHeader.biBitCount = 32;
-                        bmiAnd.bmiHeader.biCompression = Win32Constants.BI_RGB;
-
-                        int andSize = width * 4 * height;
-                        IntPtr andBuffer = Marshal.AllocHGlobal(andSize);
-                        try
-                        {
-                            int andLines = Gdi32.GetDIBits(hdc, ii.hbmMask, 0, (uint)height,
-                                andBuffer, ref bmiAnd, Win32Constants.DIB_RGB_COLORS);
-
-                            if (andLines == 0)
-                            {
-                                return new CursorInfo
-                                {
-                                    X = x, Y = y,
-                                    HotspotX = hotspotX, HotspotY = hotspotY,
-                                    Width = 0, Height = 0,
-                                    ImageData = new byte[0]
-                                };
-                            }
-
-                            // AND 掩码 → imageData 前半段（BGRA32 → 1bpp，AND=1 → 透明）
-                            for (int row = 0; row < height; row++)
-                            {
-                                int destOffset = row * andStride;
-                                for (int col = 0; col < width; col++)
-                                {
-                                    int srcOffset = row * width * 4 + col * 4;
-                                    byte pixel = Marshal.ReadByte(andBuffer, srcOffset);
-                                    if (pixel != 0) // AND=1 → transparent
-                                    {
-                                        int byteIndex = col / 8;
-                                        int bitInByte = 7 - (col % 8);
-                                        imageData[destOffset + byteIndex] |= (byte)(1 << bitInByte);
-                                    }
-                                }
-                            }
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(andBuffer);
-                        }
-
-                        return new CursorInfo
-                        {
-                            X = x, Y = y,
-                            HotspotX = hotspotX, HotspotY = hotspotY,
-                            Width = width, Height = height,
-                            ImageData = imageData
-                        };
-                    }
-                    finally
-                    {
-                        User32.ReleaseDC(IntPtr.Zero, hdc);
-                    }
+                        X = x, Y = y,
+                        HotspotX = ii.xHotspot, HotspotY = ii.yHotspot,
+                        Width = width, Height = height,
+                        ImageData = imageData
+                    };
                 }
-
-                // hbmMask 与 hbmColor 均为 null — 无光标图像可用
-                return new CursorInfo
+                finally
                 {
-                    X = x, Y = y,
-                    HotspotX = hotspotX, HotspotY = hotspotY,
-                    Width = 0, Height = 0,
-                    ImageData = new byte[0]
-                };
-            }
-            finally
-            {
-                // Clean up icon bitmaps
-                if (ii.hbmMask != IntPtr.Zero) Gdi32.DeleteObject(ii.hbmMask);
-                if (ii.hbmColor != IntPtr.Zero) Gdi32.DeleteObject(ii.hbmColor);
+                    DestroyIconBitmaps(ii);
+                }
             }
         }
-        /// <summary>读取 32bpp 掩码缓冲中 (row, col) 的位（1bpp 位转 32bpp 后 B 通道 != 0 表示 1）。</summary>
-        private static bool ReadMaskBit(IntPtr buffer, int row, int col, int width)
+
+        /// <summary>
+        /// 用 DrawIconEx 把光标渲染到缓存的 32bpp DIB section，
+        /// 合成 [AND 1bpp | XOR BGRA] 复合格式（AND=1 表示透明，由渲染结果的
+        /// alpha==0 推导）。渲染结果为 GDI 按光标自身掩码/alpha 合成后的
+        /// 正确图像，不再依赖 DDB 无意义的 alpha 字节。
+        /// </summary>
+        private bool TryRenderCursorShape(IntPtr hCursor, ICONINFO ii,
+            out byte[] imageData, out int width, out int height)
         {
-            int offset = row * width * 4 + col * 4;
-            return Marshal.ReadByte(buffer, offset) != 0;
+            imageData = null;
+            width = 0;
+            height = 0;
+
+            try
+            {
+                // 尺寸探测位图：颜色光标用 hbmColor；单色光标 hbmMask 为双倍高（取半）
+                IntPtr probeBitmap = ii.hbmColor != IntPtr.Zero ? ii.hbmColor : ii.hbmMask;
+                if (probeBitmap == IntPtr.Zero)
+                    return false;
+
+                IntPtr hdc = User32.GetDC(IntPtr.Zero);
+                if (hdc == IntPtr.Zero)
+                    return false;
+
+                try
+                {
+                    var bmiQuery = new BITMAPINFO();
+                    bmiQuery.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                    bmiQuery.bmiHeader.biBitCount = 0;
+
+                    Gdi32.GetDIBits(hdc, probeBitmap, 0, 0, IntPtr.Zero,
+                        ref bmiQuery, Win32Constants.DIB_RGB_COLORS);
+
+                    width = Math.Abs(bmiQuery.bmiHeader.biWidth);
+                    int fullHeight = Math.Abs(bmiQuery.bmiHeader.biHeight);
+                    bool hasColor = ii.hbmColor != IntPtr.Zero;
+                    height = hasColor ? fullHeight : fullHeight / 2;
+
+                    // 防御异常光标尺寸（防止恶意/损坏光标导致 OOM）
+                    if (width <= 0 || height <= 0 || width > 512 || height > 512)
+                        return false;
+
+                    if (!EnsureDib(hdc, width, height))
+                        return false;
+
+                    // 清零 DIB（全透明背景），再让 GDI 合成光标
+                    Marshal.Copy(_dibZeroes, 0, _dibBuffer, _dibZeroes.Length);
+
+                    bool ok = User32.DrawIconEx(_dibDc, 0, 0, hCursor, width, height,
+                        0, IntPtr.Zero, Win32Constants.DI_NORMAL);
+                    if (!ok)
+                        return false;
+
+                    // GDI 批处理可能尚未落地：直接读 DIB 内存前必须 flush
+                    Gdi32.GdiFlush();
+
+                    // 渲染结果 → 托管数组（每形状变化仅一次，逐字节拷贝可接受）
+                    int dibBytes = width * height * 4;
+                    byte[] rendered = new byte[dibBytes];
+                    Marshal.Copy(_dibBuffer, rendered, 0, dibBytes);
+
+                    // 合成 [AND 1bpp | XOR BGRA]：alpha==0 → AND=1（透明）
+                    int andStride = ((width + 15) / 16) * 2;
+                    int xorStride = width * 4;
+                    imageData = new byte[(andStride + xorStride) * height];
+                    int xorBase = andStride * height;
+
+                    for (int row = 0; row < height; row++)
+                    {
+                        int srcRow = row * width * 4;
+                        int dstRow = xorBase + row * xorStride;
+                        int andRow = row * andStride;
+                        for (int col = 0; col < width; col++)
+                        {
+                            int s = srcRow + col * 4;
+                            byte b = rendered[s];
+                            byte g = rendered[s + 1];
+                            byte r = rendered[s + 2];
+                            byte a = rendered[s + 3];
+                            int d = dstRow + col * 4;
+                            imageData[d] = b;
+                            imageData[d + 1] = g;
+                            imageData[d + 2] = r;
+                            imageData[d + 3] = a;
+                            if (a == 0)
+                            {
+                                int byteIndex = col / 8;
+                                int bitInByte = 7 - (col % 8);
+                                imageData[andRow + byteIndex] |= (byte)(1 << bitInByte);
+                            }
+                        }
+                    }
+                    return true;
+                }
+                finally
+                {
+                    User32.ReleaseDC(IntPtr.Zero, hdc);
+                }
+            }
+            catch (Exception)
+            {
+                imageData = null;
+                width = 0;
+                height = 0;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 确保缓存 DIB section 就绪且尺寸匹配（尺寸变化时销毁重建）。
+        /// DIB section 在系统内存中，DrawIconEx 渲染结果可直接读内存，
+        /// 无需 GetDIBits 视频内存回读（虚拟机 GDI 回读极慢）。
+        /// </summary>
+        private bool EnsureDib(IntPtr refDc, int width, int height)
+        {
+            if (_dibReady && _dibW == width && _dibH == height)
+                return true;
+
+            DestroyDib();
+
+            _dibDc = Gdi32.CreateCompatibleDC(refDc);
+            if (_dibDc == IntPtr.Zero)
+                return false;
+
+            var bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            bmi.bmiHeader.biWidth = width;
+            bmi.bmiHeader.biHeight = -height; // top-down：行 0 在缓冲区顶部
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
+
+            _dibBitmap = Gdi32.CreateDIBSection(_dibDc, ref bmi,
+                Win32Constants.DIB_RGB_COLORS, out _dibBuffer, IntPtr.Zero, 0);
+            if (_dibBitmap == IntPtr.Zero || _dibBuffer == IntPtr.Zero)
+            {
+                DestroyDib();
+                return false;
+            }
+
+            _dibOldObject = Gdi32.SelectObject(_dibDc, _dibBitmap);
+            _dibW = width;
+            _dibH = height;
+            _dibZeroes = new byte[width * height * 4];
+            _dibReady = true;
+            return true;
+        }
+
+        /// <summary>释放缓存 DIB section 与内存 DC。</summary>
+        private void DestroyDib()
+        {
+            if (_dibDc != IntPtr.Zero)
+            {
+                if (_dibBitmap != IntPtr.Zero)
+                {
+                    if (_dibOldObject != IntPtr.Zero)
+                        Gdi32.SelectObject(_dibDc, _dibOldObject);
+                    Gdi32.DeleteObject(_dibBitmap);
+                    _dibBitmap = IntPtr.Zero;
+                    _dibOldObject = IntPtr.Zero;
+                }
+                Gdi32.DeleteDC(_dibDc);
+                _dibDc = IntPtr.Zero;
+            }
+            _dibBuffer = IntPtr.Zero;
+            _dibZeroes = null;
+            _dibReady = false;
         }
     }
 }

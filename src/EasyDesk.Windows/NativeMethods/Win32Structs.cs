@@ -175,6 +175,9 @@ namespace EasyDesk.Windows.NativeMethods
         public const uint DIB_RGB_COLORS = 0;
         public const uint BI_RGB = 0;
 
+        // DrawIconEx flags: DI_NORMAL draws the icon with its mask applied
+        public const uint DI_NORMAL = 0x0003;
+
         // Clipboard formats
         public const uint CF_UNICODETEXT = 13;
         /// <summary>文件列表剪贴板格式（右键复制文件时使用）。</summary>

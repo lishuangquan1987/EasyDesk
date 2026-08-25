@@ -8,13 +8,33 @@ using EasyDesk.Windows.NativeMethods;
 namespace EasyDesk.Windows
 {
     /// <summary>
-    /// Windows screen capturer using GDI+ (CopyFromScreen / BitBlt).
-    /// Not thread-safe — internal DC state must be guarded externally.
+    /// Windows screen capturer using GDI (CopyFromScreen / BitBlt).
+    ///
+    /// 性能设计（弱机 XP 单核关键路径）：
+    /// CaptureScaled 使用“缓存的内存 DC + 32bpp DIB section”：
+    /// - DIB section 位于系统内存，StretchBlt 渲染后直接 memcpy 读回，
+    ///   省去每帧 CreateCompatibleBitmap（视频内存 DDB）+ GetDIBits 回读。
+    ///   虚拟化 GDI（VMware SVGA）上这两项是捕获的主要耗时（实测每帧 ~500ms，
+    ///   捕获仅 ~1.7 FPS，是整条链路的瓶颈）。
+    /// - 缓存对象跨帧复用，仅目标尺寸变化时重建；加锁防御多线程调用。
     /// </summary>
     public class WindowsScreenCapturer : IScreenCapturer
     {
         // 枚举显示器使用无状态复用实例，避免捕获热路径（~60fps）每次分配新对象
         private static readonly WindowsScreenCapturer EnumerationInstance = new WindowsScreenCapturer();
+
+        // ── CaptureScaled 缓存：内存 DC + 32bpp DIB section（常驻选中）──
+        private readonly object _scaledLock = new object();
+        private IntPtr _scaledDc;
+        private IntPtr _scaledDib;
+        private IntPtr _scaledDibBuffer;
+        private IntPtr _scaledOldObject;
+        private int _scaledW;
+        private int _scaledH;
+        private bool _scaledReady;
+
+        [DllImport("msvcrt.dll", EntryPoint = "memcpy", SetLastError = false)]
+        private static extern IntPtr Memcpy(IntPtr dst, IntPtr src, IntPtr count);
 
         public ScreenFrame CaptureScreen()
         {
@@ -54,6 +74,7 @@ namespace EasyDesk.Windows
         /// StretchBlt performs the scaling inside GDI, so the caller avoids a
         /// full-resolution pixel buffer and the managed downscale pass that used to
         /// run on the encode thread (the dominant per-frame cost on Win7 32-bit).
+        /// 内存 DC + DIB section 跨调用缓存（见类注释）。
         /// </summary>
         public ScreenFrame CaptureScaled(int x, int y, int width, int height, int targetWidth, int targetHeight)
         {
@@ -62,7 +83,10 @@ namespace EasyDesk.Windows
             if (targetWidth <= 0) throw new ArgumentOutOfRangeException("targetWidth");
             if (targetHeight <= 0) throw new ArgumentOutOfRangeException("targetHeight");
 
-            return CaptureRegionScaledInternal(x, y, width, height, targetWidth, targetHeight);
+            lock (_scaledLock)
+            {
+                return CaptureRegionScaledInternal(x, y, width, height, targetWidth, targetHeight);
+            }
         }
 
         private ScreenFrame CaptureRegionScaledInternal(
@@ -70,101 +94,39 @@ namespace EasyDesk.Windows
         {
             int stride = targetWidth * 4;
             int totalBytes = stride * targetHeight;
-            IntPtr pixelBuffer = Marshal.AllocHGlobal(totalBytes);
-            if (pixelBuffer == IntPtr.Zero)
-                throw new OutOfMemoryException("Failed to allocate pixel buffer for scaled screen capture.");
+
+            IntPtr hdcScreen = User32.GetDC(IntPtr.Zero);
+            if (hdcScreen == IntPtr.Zero)
+                throw new InvalidOperationException("GetDC returned null.");
 
             try
             {
-                IntPtr hdcScreen = User32.GetDC(IntPtr.Zero);
-                if (hdcScreen == IntPtr.Zero)
-                    throw new InvalidOperationException("GetDC returned null.");
+                if (!EnsureScaledDib(hdcScreen, targetWidth, targetHeight))
+                    throw new InvalidOperationException("CreateDIBSection failed.");
 
-                try
+                // COLORONCOLOR = fastest stretch mode; screen content is
+                // downscaled during the blit, not in a second pass.
+                uint rop = Win32Constants.SRCCOPY | Win32Constants.CAPTUREBLT;
+                bool stretchOk = Gdi32.StretchBlt(
+                    _scaledDc, 0, 0, targetWidth, targetHeight,
+                    hdcScreen, x, y, width, height, rop);
+
+                if (!stretchOk)
                 {
-                    IntPtr hdcMem = Gdi32.CreateCompatibleDC(hdcScreen);
-                    if (hdcMem == IntPtr.Zero)
-                        throw new InvalidOperationException("CreateCompatibleDC failed.");
-
-                    try
-                    {
-                        IntPtr hOldBitmap = IntPtr.Zero;
-                        IntPtr hBitmap = Gdi32.CreateCompatibleBitmap(hdcScreen, targetWidth, targetHeight);
-                        if (hBitmap == IntPtr.Zero)
-                            throw new InvalidOperationException("CreateCompatibleBitmap failed.");
-
-                        try
-                        {
-                            hOldBitmap = Gdi32.SelectObject(hdcMem, hBitmap);
-                            if (hOldBitmap == IntPtr.Zero)
-                            {
-                                var selError = Marshal.GetLastWin32Error();
-                                throw new InvalidOperationException(
-                                    string.Format("SelectObject failed. Win32 error: {0}", selError));
-                            }
-
-                            // COLORONCOLOR = fastest stretch mode; screen content is
-                            // downscaled during the blit, not in a second pass.
-                            int prevStretchMode = Gdi32.SetStretchBltMode(
-                                hdcMem, Win32Constants.STRETCH_COLORONCOLOR);
-                            if (prevStretchMode == 0)
-                            {
-                                var smError = Marshal.GetLastWin32Error();
-                                throw new InvalidOperationException(
-                                    string.Format("SetStretchBltMode failed. Win32 error: {0}", smError));
-                            }
-
-                            uint rop = Win32Constants.SRCCOPY | Win32Constants.CAPTUREBLT;
-                            bool stretchOk = Gdi32.StretchBlt(
-                                hdcMem, 0, 0, targetWidth, targetHeight,
-                                hdcScreen, x, y, width, height, rop);
-
-                            if (!stretchOk)
-                            {
-                                var error = Marshal.GetLastWin32Error();
-                                throw new InvalidOperationException(
-                                    string.Format("StretchBlt failed. Win32 error: {0}", error));
-                            }
-
-                            // Get pixel data via GetDIBits at the target size
-                            var bmi = new BITMAPINFO();
-                            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-                            bmi.bmiHeader.biWidth = targetWidth;
-                            bmi.bmiHeader.biHeight = -targetHeight; // negative = top-down
-                            bmi.bmiHeader.biPlanes = 1;
-                            bmi.bmiHeader.biBitCount = 32;
-                            bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
-                            bmi.bmiHeader.biSizeImage = (uint)totalBytes;
-
-                            int result = Gdi32.GetDIBits(
-                                hdcMem, hBitmap, 0, (uint)targetHeight,
-                                pixelBuffer, ref bmi, Win32Constants.DIB_RGB_COLORS);
-
-                            if (result == 0)
-                            {
-                                var error = Marshal.GetLastWin32Error();
-                                throw new InvalidOperationException(
-                                    string.Format("GetDIBits failed. Win32 error: {0}", error));
-                            }
-                        }
-                        finally
-                        {
-                            if (hOldBitmap != IntPtr.Zero)
-                            {
-                                try { Gdi32.SelectObject(hdcMem, hOldBitmap); } catch { }
-                            }
-                            Gdi32.DeleteObject(hBitmap);
-                        }
-                    }
-                    finally
-                    {
-                        Gdi32.DeleteDC(hdcMem);
-                    }
+                    var error = Marshal.GetLastWin32Error();
+                    throw new InvalidOperationException(
+                        string.Format("StretchBlt failed. Win32 error: {0}", error));
                 }
-                finally
-                {
-                    User32.ReleaseDC(IntPtr.Zero, hdcScreen);
-                }
+
+                // GDI 批处理可能尚未落地：直接读 DIB 内存前必须 flush
+                Gdi32.GdiFlush();
+
+                IntPtr pixelBuffer = Marshal.AllocHGlobal(totalBytes);
+                if (pixelBuffer == IntPtr.Zero)
+                    throw new OutOfMemoryException("Failed to allocate pixel buffer for scaled screen capture.");
+
+                // 直接从 DIB section 内存拷贝（无 GetDIBits 视频内存回读）
+                Memcpy(pixelBuffer, _scaledDibBuffer, (IntPtr)totalBytes);
 
                 return new ScreenFrame
                 {
@@ -175,11 +137,80 @@ namespace EasyDesk.Windows
                     PixelFormat = 0
                 };
             }
-            catch
+            finally
             {
-                Marshal.FreeHGlobal(pixelBuffer);
-                throw;
+                User32.ReleaseDC(IntPtr.Zero, hdcScreen);
             }
+        }
+
+        /// <summary>
+        /// 确保缓存 DIB section 就绪且尺寸匹配（尺寸变化时销毁重建）。
+        /// DIB section 常驻选中到 _scaledDc，StretchBlt 渲染结果可直接读内存。
+        /// </summary>
+        private bool EnsureScaledDib(IntPtr refDc, int targetWidth, int targetHeight)
+        {
+            if (_scaledReady && _scaledW == targetWidth && _scaledH == targetHeight)
+                return true;
+
+            DestroyScaledDib();
+
+            _scaledDc = Gdi32.CreateCompatibleDC(refDc);
+            if (_scaledDc == IntPtr.Zero)
+                return false;
+
+            var bmi = new BITMAPINFO();
+            bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+            bmi.bmiHeader.biWidth = targetWidth;
+            bmi.bmiHeader.biHeight = -targetHeight; // negative = top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
+            bmi.bmiHeader.biSizeImage = (uint)(targetWidth * targetHeight * 4);
+
+            _scaledDib = Gdi32.CreateDIBSection(_scaledDc, ref bmi,
+                Win32Constants.DIB_RGB_COLORS, out _scaledDibBuffer, IntPtr.Zero, 0);
+            if (_scaledDib == IntPtr.Zero || _scaledDibBuffer == IntPtr.Zero)
+            {
+                DestroyScaledDib();
+                return false;
+            }
+
+            _scaledOldObject = Gdi32.SelectObject(_scaledDc, _scaledDib);
+            if (_scaledOldObject == IntPtr.Zero)
+            {
+                DestroyScaledDib();
+                return false;
+            }
+
+            // COLORONCOLOR = 最快拉伸模式（DC 属性，设置一次持续生效）
+            Gdi32.SetStretchBltMode(_scaledDc, Win32Constants.STRETCH_COLORONCOLOR);
+
+            _scaledW = targetWidth;
+            _scaledH = targetHeight;
+            _scaledReady = true;
+            return true;
+        }
+
+        /// <summary>释放缓存的 DIB section 与内存 DC。</summary>
+        private void DestroyScaledDib()
+        {
+            if (_scaledDc != IntPtr.Zero)
+            {
+                if (_scaledDib != IntPtr.Zero)
+                {
+                    if (_scaledOldObject != IntPtr.Zero)
+                        Gdi32.SelectObject(_scaledDc, _scaledOldObject);
+                    Gdi32.DeleteObject(_scaledDib);
+                    _scaledDib = IntPtr.Zero;
+                    _scaledOldObject = IntPtr.Zero;
+                }
+                Gdi32.DeleteDC(_scaledDc);
+                _scaledDc = IntPtr.Zero;
+            }
+            _scaledDibBuffer = IntPtr.Zero;
+            _scaledW = 0;
+            _scaledH = 0;
+            _scaledReady = false;
         }
 
         private ScreenFrame CaptureRegionInternal(int x, int y, int width, int height)

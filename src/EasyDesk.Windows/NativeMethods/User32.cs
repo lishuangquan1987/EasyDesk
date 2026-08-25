@@ -31,6 +31,23 @@ namespace EasyDesk.Windows.NativeMethods
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool DestroyIcon(IntPtr hIcon);
 
+        /// <summary>
+        /// Draws an icon/cursor into a DC, applying its AND/XOR masks (or the alpha
+        /// channel for 32bpp alpha cursors). Rendering into a zeroed 32bpp DIB yields
+        /// a correct BGRA image with proper transparency — more reliable than reading
+        /// the raw DDB masks via GetDIBits (DDB alpha is undefined/driver-dependent).
+        /// </summary>
+        [DllImport(DllName)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool DrawIconEx(
+            IntPtr hdc,
+            int xLeft, int yTop,
+            IntPtr hIcon,
+            int cxWidth, int cyWidth,
+            uint istepIfAniCur,
+            IntPtr hbrFlickerFreeDraw,
+            uint diFlags);
+
         [DllImport(DllName)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool SetCursorPos(int x, int y);

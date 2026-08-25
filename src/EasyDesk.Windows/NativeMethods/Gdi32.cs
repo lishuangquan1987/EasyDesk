@@ -74,5 +74,28 @@ namespace EasyDesk.Windows.NativeMethods
             IntPtr lpvBits,
             ref BITMAPINFO lpbi,
             uint uUsage);
+
+        /// <summary>
+        /// Creates a 32bpp top-down DIB section in system memory. GDI renders
+        /// directly into system memory (no video-memory round trip), and the caller
+        /// reads ppvBits directly — far faster than CreateCompatibleBitmap + GetDIBits
+        /// on virtualized/software-rendered GDI (e.g. VMware SVGA on XP).
+        /// </summary>
+        [DllImport(DllName)]
+        public static extern IntPtr CreateDIBSection(
+            IntPtr hdc,
+            ref BITMAPINFO pbmi,
+            uint usage,
+            out IntPtr ppvBits,
+            IntPtr hSection,
+            uint offset);
+
+        /// <summary>
+        /// Flushes the GDI batch so pending drawing (e.g. StretchBlt) is visible
+        /// when reading DIB section memory directly.
+        /// </summary>
+        [DllImport(DllName)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GdiFlush();
     }
 }
