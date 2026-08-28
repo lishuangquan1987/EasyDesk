@@ -9,14 +9,32 @@ XP/Win7 上摆脱 BitBlt 截屏瓶颈的镜像显示驱动 + EasyDesk 用户态�
 
 ```
 Mirror/
+├── build-release.bat            # 一键编译 + 打包到 release/（需 WDK7.1）
+├── release/                     # 集中安装包（生成目录，勿提交）：
+│   │                            #   mirror.dll + mirror_m.sys + MirrorDriver.inf + install.bat
+│   ├── mirror.dll               #   XDDM 镜像显示驱动
+│   ├── mirror_m.sys             #   miniport
+│   ├── MirrorDriver.inf         #   安装 inf
+│   └── install.bat              #   一键安装脚本（推荐）
 ├── driver/                       # 内核驱动工程（独立于 EasyDesk C# 库）
 │   ├── MirrorDisp/MirrorDisp.c   # 镜像显示驱动（XDDM，记录脏矩形）
 │   ├── MirrorMini/MirrorMini.c   # 最小化 miniport
-│   └── inf/MirrorDriver.inf      # 驱动安装文件（Attach.ToDesktop=1）
+│   ├── inf/MirrorDriver.inf      # 驱动安装文件（Attach.ToDesktop=1）
+│   └── install.bat               # 一键安装脚本
 └── client/                       # EasyDesk C# 用户态捕获客户端
     ├── MirrorScreenCapturer.cs   # IScreenCapturer + ICaptureChangesReader 实现
     └── MirrorNative.cs           # 驱动访问 P/Invoke（IOCTL/ExtEscape/共享缓冲映射）
 ```
+
+### 一键打包到 release/
+
+```bash
+build-release.bat
+```
+
+自动用 WDK7.1 编译 MirrorDisp + MirrorMini，并把 `mirror.dll`、`mirror_m.sys`、`MirrorDriver.inf`、`install.bat` 集中复制到 `Mirror/release/`。之后把整个 `release/` 文件夹拷到 XP/Win7 目标机安装即可。
+
+> `release/` 是生成目录（已被 `.gitignore` 忽略），dll/sys 是编译产物不进 git；`driver/` 下的 inf 和 install.bat 才是权威源码。
 
 ## 编译（内核驱动）
 

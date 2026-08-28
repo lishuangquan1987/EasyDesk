@@ -1,0 +1,4 @@
+# Release package output (generated copy of driver binaries + install files)
+# This is a local packaging directory; regenerate it after building the driver.
+# Authoritative sources live under driver/ (MirrorDisp, MirrorMini, inf, install.bat).
+release/
