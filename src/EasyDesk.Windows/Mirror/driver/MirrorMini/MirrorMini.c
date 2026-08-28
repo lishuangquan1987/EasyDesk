@@ -13,21 +13,26 @@
  * 状态：骨架，需在 WDK7 编译验证。
  */
 
-#include <ntddk.h>
-#include <video.h>
+#include <miniport.h>
 #include <ntddvdeo.h>
+#include <video.h>
+#include <string.h>
+
+/* 注意：视频 miniport 驱动正确 include：
+ * miniport.h（内核基础）→ ntddvdeo.h（提供 PVIDEO_POWER_MANAGEMENT、
+ * PVIDEO_HW_INITIALIZATION_DATA 等类型）→ video.h（依赖这些类型）。
+ * 不要包含 ntddk.h（与 miniport.h 冲突），顺序不可颠倒。 */
 
 /* ---- DriverEntry：注册 HwVid 回调 ---- */
 
-NTSTATUS
+ULONG
 DriverEntry(
-    IN PDRIVER_OBJECT DriverObject,
-    IN PUNICODE_STRING RegistryPath)
+    IN PVOID Context1,
+    IN PVOID Context2)
 {
     VIDEO_HW_INITIALIZATION_DATA HwInitData;
 
-    RtlZeroMemory(&HwInitData, sizeof(VIDEO_HW_INITIALIZATION_DATA));
-
+    memset(&HwInitData, 0, sizeof(VIDEO_HW_INITIALIZATION_DATA));
     HwInitData.HwInitDataSize = sizeof(VIDEO_HW_INITIALIZATION_DATA);
     /* 镜像 miniport 不需要真正访问硬件；以下回调在 WDK7 示例中多为空或占位。
      * 关键：设置 HwFindAdapter 以被系统枚举到。 */
@@ -36,5 +41,5 @@ DriverEntry(
      * HwInitData.HwStartIO = MirrorHwStartIO;
      * ... */
 
-    return VideoPortInitialize(DriverObject, RegistryPath, &HwInitData, NULL);
+    return (ULONG)VideoPortInitialize(Context1, Context2, &HwInitData, NULL);
 }

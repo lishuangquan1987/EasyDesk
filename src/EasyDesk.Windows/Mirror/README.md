@@ -48,6 +48,8 @@ dotnet build EasyDesk.sln
 ## 状态
 
 - [x] 方案 X 接口（`ICaptureChangesReader` + `ScreenRect`）
-- [x] 驱动骨架（display / miniport / inf）
-- [ ] WDK7 编译验证（需安装 WDK）
+- [x] 驱动源码（display / miniport / inf）
+- [x] **WDK7 编译验证**（WDK 7.1 + `build.exe`，`chk WXP`，产物 `mirror.dll` + `mirror_m.sys`）
+  - 命令：`setenv.bat C:\WinDDK\7600.16385.1 chk WXP && cd MirrorDisp && build`
+  - 已解决的关键问题：`TARGETTYPE=GDI_DRIVER`（非 DRIVER）、`winddi.h` 单头包含、DDI 签名须与 winddi.h 严格一致、sources 需纯 ASCII（nmake 逐字节解析，中文注释致解析失败）
 - [ ] 用户态共享缓冲映射 + IOCTL 对接（客户端骨架，待驱动验证后细化）

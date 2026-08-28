@@ -1,0 +1,20 @@
+# sources - WDK build source list for MirrorDisp (XDDM mirror display driver)
+# Based on WDK7 mirror driver sample \src\video\displays\mirror\disp\sources
+# NOTE: keep pure ASCII - nmake parses byte-wise.
+
+TARGETNAME=mirror
+TARGETTYPE=GDI_DRIVER
+
+# XDDM display driver links libcntpr (C runtime for display drivers)
+TARGETLIBS=$(TARGETLIBS) $(SDK_LIB_PATH)\libcntpr.lib
+
+!IFNDEF MSC_WARNING_LEVEL
+MSC_WARNING_LEVEL=/W3
+!ENDIF
+
+# driver.h lives in this dir
+INCLUDES=.;$(DDK_INC_PATH)
+
+SOURCES=MirrorDisp.c
+
+TARGET_DESTINATION=retail

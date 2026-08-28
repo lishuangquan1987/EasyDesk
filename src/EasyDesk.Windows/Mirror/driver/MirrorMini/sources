@@ -1,0 +1,20 @@
+# sources - WDK build source list for MirrorMini (video miniport)
+# Based on WDK7 sample \src\video\miniport\mirror\mini\sources
+# NOTE: keep pure ASCII - nmake parses byte-wise.
+
+TARGETNAME=mirror_m
+TARGETPATH=obj
+TARGETTYPE=DRIVER
+
+MSC_WARNING_LEVEL=/W3
+
+# video miniport links videoprt + ntoskrnl
+TARGETLIBS=$(TARGETLIBS) \
+    $(SDK_LIB_PATH)\videoprt.lib \
+    $(SDK_LIB_PATH)\ntoskrnl.lib
+
+INCLUDES=.;$(DDK_INC_PATH)
+
+SOURCES=MirrorMini.c
+
+TARGET_DESTINATION=retail
