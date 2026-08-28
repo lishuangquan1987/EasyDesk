@@ -49,25 +49,31 @@ build
 # 编译 MirrorMini（视频 miniport）→ 产物 mirror_m.sys
 cd ..\MirrorMini
 build
+
+# 如需 64 位 Win7 支持，用 x64 目标重新编译：
+call C:\WinDDK\7600.16385.1\bin\setenv.bat C:\WinDDK\7600.16385.1 chk x64
+# (分别 cd 到 MirrorDisp / MirrorMini 后 build)
 ```
 
 产物位置：
-- `MirrorDisp/objchk_wxp_x86/i386/mirror.dll`
-- `MirrorMini/objchk_wxp_x86/i386/mirror_m.sys`
+- x86：`MirrorDisp/objchk_wxp_x86/i386/mirror.dll`、`MirrorMini/objchk_wxp_x86/i386/mirror_m.sys`
+- x64：`MirrorDisp/objchk_win7_amd64/amd64/mirror.dll`、`MirrorMini/objchk_win7_amd64/amd64/mirror_m.sys`
 
-> ⚠️ 驱动签名：XP 32 位免签；Win7 需测试签名（`bcdedit /set testsigning on`）或 WHQL 签名。
+> ⚠️ 驱动签名：**XP 32 位免签**；**Win7 64 位必须开测试签名**（管理员 `bcdedit /set testsigning on` + 重启）或做 WHQL 签名，否则未签名驱动被拒加载。另：64 位 Windows 只能加载 64 位驱动，务必用 x64 编译产物。
 
 ## 安装驱动
 
-在目标机（XP/Win7）上，把 `mirror.dll`、`mirror_m.sys`、`install.bat`、`MirrorDriver.inf` 拷到一起，以**管理员**身份执行。
+把整个 `release/` 文件夹拷到目标机，以**管理员**运行 `release\install.bat`。脚本**自动检测系统位数**并选择对应驱动：
+- 32 位 → `x86\mirror.dll` + `x86\mirror_m.sys`
+- 64 位 → `x64\mirror64.dll` + `x64\mirror_m64.sys`
 
 ### 方式一（推荐）：`install.bat`
 
-双击或以管理员运行 `install.bat`。它用 `sc create` + `reg add` 直接注册内核驱动服务和显示驱动配置（`InstalledDisplayDrivers=mirror`、`Attach.ToDesktop=1`），绕开 inf 对 Display 类驱动的右键限制。完成后**重启**，验证 `sc query mirror` 为 RUNNING。
+管理员运行 `install.bat`。它用 `sc create` + `reg add` 直接注册内核驱动服务和显示驱动配置（`InstalledDisplayDrivers=mirror`、`Attach.ToDesktop=1`）。完成后**重启**，验证 `sc query mirror` 为 RUNNING。
 
 ### 方式二：右键 `MirrorDriver.inf` → 安装
 
-inf 已含 `[DefaultInstall]` 节（右键安装的入口）。若系统接受则可用，否则请用方式一。
+inf 已含 `[DefaultInstall]` 节。若系统接受则可用，否则请用方式一。
 
 ### 验证
 - `sc query mirror` → 状态 RUNNING
