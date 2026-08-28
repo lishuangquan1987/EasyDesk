@@ -71,11 +71,11 @@ bcdedit /set testsigning on
 ```
 然后**重启**。
 
-### 第 2 步：给驱动签名（仅 64 位 Win7 需要）
-运行 `release\sign.bat`。它：
-1. 用 MakeCert 创建自签名测试证书（`easyrdp-test.cer`）
-2. 用 `certutil` 把证书装进「受信任的根证书颁发机构」存储
-3. 用 SignTool 给 `x64\`、`x86\` 下的驱动签名
+### 第 2 步：信任测试证书（仅 64 位 Win7 需要）
+
+> 驱动已在**开发机**用 WDK 的 `sign.bat` 签好名（release 里的 dll/sys 已带签名）。**目标机不需要 WDK**，只需信任那个测试证书。
+
+运行 `release\trust.bat`。它用系统自带的 `certutil` 把 `easyrdp-test.cer` 装进「受信任的根证书颁发机构」和当前用户 My 存储。
 
 > 若跳过此步，`sc start mirror` 会报 **577**（无法验证数字签名）。
 
