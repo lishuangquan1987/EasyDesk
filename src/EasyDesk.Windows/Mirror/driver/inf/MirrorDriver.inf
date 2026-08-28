@@ -1,0 +1,78 @@
+; MirrorDriver.inf — 镜像显示驱动安装文件
+;
+; 参考：微软 WDK7 (Version 7600) 示例 \src\video\displays\mirror\app\mirror.inf
+;
+; 作用：安装 XDDM 镜像显示驱动（display + miniport），通过 Attach.ToDesktop=1
+;       把镜像区域挂到全局桌面，使 GDI 把桌面绘图派发给镜像驱动。
+;
+; 平台：XP / Win7（< Win8）。Win8 起系统拒绝安装镜像驱动。
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Provider    = %ProviderName%
+Class       = Display
+ClassGuid   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+DriverVer   = 06/26/2026,1.0.0.0
+CatalogFile = mirror.cat
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+; ---- 显示驱动（display）----
+[Display.Driver]
+CopyFiles = Display.Driver.Files
+
+[Display.Driver.Files]
+mirror.sys   ; display driver (编译产物命名按实际 makefile 输出调整)
+mirror.dll   ; 用户态镜像客户端/辅助 DLL（可选）
+
+; ---- miniport ----
+[MiniPort.Driver]
+CopyFiles = MiniPort.Driver.Files
+
+[MiniPort.Driver.Files]
+mirror_m.sys  ; miniport driver
+
+; ---- 模型/安装 ----  
+[Manufacturer]
+%ProviderName% = DeviceList,NTx86
+
+[DeviceList]
+%DeviceDesc% = Mirror.Install, ROOT\DISPLAY\0001
+
+[DeviceList.NTx86]
+%DeviceDesc% = Mirror.Install, ROOT\DISPLAY\0001
+
+[Mirror.Install.NT]
+CopyFiles = Display.Driver.Files, MiniPort.Driver.Files
+
+[Mirror.Install.NT.HW]
+AddReg = Mirror.AddReg
+
+; 关键：Attach.ToDesktop=1 使镜像驱动挂到全局桌面
+[Mirror.AddReg]
+HKR,,Attach.ToDesktop,0x00010001,1
+
+[Mirror.Install.NT.Services]
+AddService = MirrorDisplay,0x00000002, Mirror.Service
+AddService = MirrorMiniPort,0x00000002, MiniPort.Service
+
+[Mirror.Service]
+DisplayName  = %SvcName%
+ServiceType  = 1        ; SERVICE_KERNEL_DRIVER
+StartType    = 3        ; SERVICE_DEMAND_START
+ErrorControl = 1
+ServiceBinary = %12%\mirror.sys
+
+[MiniPort.Service]
+DisplayName  = %MiniSvcName%
+ServiceType  = 1
+StartType    = 3
+ErrorControl = 1
+ServiceBinary = %12%\mirror_m.sys
+
+[Strings]
+ProviderName = "EasyRDP"
+DeviceDesc   = "EasyRDP Mirror Display Driver"
+SvcName      = "EasyRDP Mirror Display Driver"
+MiniSvcName  = "EasyRDP Mirror MiniPort"
