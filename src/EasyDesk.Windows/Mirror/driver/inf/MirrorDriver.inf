@@ -1,78 +1,99 @@
-; MirrorDriver.inf — 镜像显示驱动安装文件
+; MirrorDriver.inf — EasyRDP XDDM mirror display driver installation
 ;
-; 参考：微软 WDK7 (Version 7600) 示例 \src\video\displays\mirror\app\mirror.inf
+; Based on Microsoft WDK7 mirror driver sample \src\video\displays\mirror\app\mirror.inf
+; Adapted for EasyRDP. XDDM mirror driver: display driver = mirror.dll,
+; miniport = mirror_m.sys.
 ;
-; 作用：安装 XDDM 镜像显示驱动（display + miniport），通过 Attach.ToDesktop=1
-;       把镜像区域挂到全局桌面，使 GDI 把桌面绘图派发给镜像驱动。
-;
-; 平台：XP / Win7（< Win8）。Win8 起系统拒绝安装镜像驱动。
+; Platform: XP / Win7 (< Win8). Win8+ rejects XDDM mirror drivers.
 
 [Version]
-Signature   = "$WINDOWS NT$"
-Provider    = %ProviderName%
-Class       = Display
-ClassGuid   = {4D36E968-E325-11CE-BFC1-08002BE10318}
-DriverVer   = 06/26/2026,1.0.0.0
-CatalogFile = mirror.cat
+Signature="$CHICAGO$"
+Provider=%ProviderName%
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Class=Display
+DriverVer=06/26/2026,1.0.0
 
 [DestinationDirs]
-DefaultDestDir = 12
+DefaultDestDir   = 11
+mirror.Miniport  = 12  ; drivers
+mirror.Display   = 11  ; system32
 
-; ---- 显示驱动（display）----
-[Display.Driver]
-CopyFiles = Display.Driver.Files
+; ---- Driver information ----
 
-[Display.Driver.Files]
-mirror.sys   ; display driver (编译产物命名按实际 makefile 输出调整)
-mirror.dll   ; 用户态镜像客户端/辅助 DLL（可选）
-
-; ---- miniport ----
-[MiniPort.Driver]
-CopyFiles = MiniPort.Driver.Files
-
-[MiniPort.Driver.Files]
-mirror_m.sys  ; miniport driver
-
-; ---- 模型/安装 ----  
 [Manufacturer]
-%ProviderName% = DeviceList,NTx86
+%ProviderName% = Mirror.Mfg
 
-[DeviceList]
-%DeviceDesc% = Mirror.Install, ROOT\DISPLAY\0001
+[Mirror.Mfg]
+%DeviceDesc% = mirror, EasyRDP_Mirror
 
-[DeviceList.NTx86]
-%DeviceDesc% = Mirror.Install, ROOT\DISPLAY\0001
+; ---- General installation section ----
 
-[Mirror.Install.NT]
-CopyFiles = Display.Driver.Files, MiniPort.Driver.Files
+[mirror]
+CopyFiles=mirror.Miniport, mirror.Display
 
-[Mirror.Install.NT.HW]
-AddReg = Mirror.AddReg
+; ---- File sections ----
 
-; 关键：Attach.ToDesktop=1 使镜像驱动挂到全局桌面
-[Mirror.AddReg]
-HKR,,Attach.ToDesktop,0x00010001,1
+[mirror.Miniport]
+mirror_m.sys
 
-[Mirror.Install.NT.Services]
-AddService = MirrorDisplay,0x00000002, Mirror.Service
-AddService = MirrorMiniPort,0x00000002, MiniPort.Service
+[mirror.Display]
+mirror.dll
 
-[Mirror.Service]
-DisplayName  = %SvcName%
-ServiceType  = 1        ; SERVICE_KERNEL_DRIVER
-StartType    = 3        ; SERVICE_DEMAND_START
-ErrorControl = 1
-ServiceBinary = %12%\mirror.sys
+; ---- Service Installation ----
 
-[MiniPort.Service]
-DisplayName  = %MiniSvcName%
-ServiceType  = 1
-StartType    = 3
-ErrorControl = 1
-ServiceBinary = %12%\mirror_m.sys
+[mirror.Services]
+AddService = mirror, 0x00000002, mirror_Service_Inst, mirror_EventLog_Inst
+
+[mirror_Service_Inst]
+ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
+StartType      = 1                  ; SERVICE_SYSTEM_START
+ErrorControl   = 0                  ; SERVICE_ERROR_IGNORE
+LoadOrderGroup = Video
+ServiceBinary  = %12%\mirror_m.sys
+
+[mirror_EventLog_Inst]
+AddReg = mirror_EventLog_AddReg
+
+[mirror_EventLog_AddReg]
+HKR,,EventMessageFile,0x00020000,"%SystemRoot%\System32\IoLogMsg.dll;%SystemRoot%\System32\drivers\mirror_m.sys"
+HKR,,TypesSupported,0x00010001,7
+
+; ---- Software Installation ----
+
+[mirror.SoftwareSettings]
+AddReg = mirror_SoftwareDeviceSettings
+
+; Key settings that attach the mirror driver to the global desktop:
+; InstalledDisplayDrivers=mirror points GDI at our display DLL.
+[mirror_SoftwareDeviceSettings]
+HKR,, MirrorDriver,                %REG_DWORD%,    1
+HKR,, InstalledDisplayDrivers,     %REG_MULTI_SZ%, mirror
+HKR,, VgaCompatible,               %REG_DWORD%,    0
+HKR,, Attach.ToDesktop,            %REG_DWORD%,    1
+
+[mirror.GeneralConfigData]
+MaximumNumberOfDevices = 1
+KeepExistingDriverEnabled = 1
+
+; ---- Source file information ----
+
+[SourceDisksNames.x86]
+1 = %DiskId%,,,""
+
+[SourceDisksFiles]
+mirror_m.sys  = 1
+mirror.dll = 1
 
 [Strings]
-ProviderName = "EasyRDP"
-DeviceDesc   = "EasyRDP Mirror Display Driver"
-SvcName      = "EasyRDP Mirror Display Driver"
-MiniSvcName  = "EasyRDP Mirror MiniPort"
+
+; ---- Non-Localizable Strings ----
+
+REG_SZ         = 0x00000000
+REG_MULTI_SZ   = 0x00010000
+REG_EXPAND_SZ  = 0x00020000
+REG_BINARY     = 0x00000001
+REG_DWORD      = 0x00010001
+SERVICEROOT    = "System\CurrentControlSet\Services"
+ProviderName   = "EasyRDP"
+DeviceDesc     = "EasyRDP Mirror Display Driver"
+DiskId         = "EasyRDP Mirror Driver Installation Disk"

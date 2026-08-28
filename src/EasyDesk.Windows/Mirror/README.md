@@ -20,14 +20,38 @@ Mirror/
 
 ## 编译（内核驱动）
 
-需要 **WDK7（Version 7600）** 或 XP DDK。当前开发环境未安装 WDK，驱动代码为骨架，安装 WDK 后按以下步骤编译：
+需要 **WDK 7.1（Version 7600）**（已在本机安装于 `C:\WinDDK\7600.16385.1`）。
 
-1. 安装 WDK7（Version 7600）
-2. 复制 `Mirror/driver/MirrorDisp`、`MirrorMini` 到 WDK 示例目录或独立驱动工程
-3. 用 WDK build 环境编译（`setenv.bat` + `build`），或挂到 VS2008 驱动工程
-4. 生成的 `mirror.sys` / `mirror_m.sys` 通过 `inf/MirrorDriver.inf` 安装
+```bash
+# 编译 MirrorDisp（XDDM 镜像显示驱动）→ 产物 mirror.dll
+call C:\WinDDK\7600.16385.1\bin\setenv.bat C:\WinDDK\7600.16385.1 chk WXP
+cd EasyDesk/src/EasyDesk.Windows/Mirror/driver/MirrorDisp
+build
+
+# 编译 MirrorMini（视频 miniport）→ 产物 mirror_m.sys
+cd ..\MirrorMini
+build
+```
+
+产物位置：
+- `MirrorDisp/objchk_wxp_x86/i386/mirror.dll`
+- `MirrorMini/objchk_wxp_x86/i386/mirror_m.sys`
 
 > ⚠️ 驱动签名：XP 32 位免签；Win7 需测试签名（`bcdedit /set testsigning on`）或 WHQL 签名。
+
+## 安装驱动
+
+在目标机（XP/Win7）上：
+
+1. 把 `mirror.dll`、`mirror_m.sys`、`inf/MirrorDriver.inf` 拷到一起
+2. 管理员命令提示符，两种方式任选：
+   - 图形：右键 `MirrorDriver.inf` → 安装
+   - 命令行：`RUNDLL32.EXE SETUPAPI.DLL,InstallHinfSection DefaultInstall 132 MirrorDriver.inf`
+3. 重启或 `sc start mirror` 启动驱动服务（inf 已设 `StartType=1` 系统自启）
+4. 验证：设备管理器「显示适配器」出现 EasyRDP Mirror，或
+   `sc query mirror` 状态为 RUNNING
+
+> 卸载：设备管理器删除该设备，或 `sc delete mirror`。
 
 ## 编译（EasyDesk 客户端）
 
