@@ -4,6 +4,9 @@
 ; Adapted for EasyRDP. XDDM mirror driver: display driver = mirror.dll,
 ; miniport = mirror_m.sys.
 ;
+; Installation method: right-click "Install" (uses [DefaultInstall] + AddService),
+; which is the standard way to install a non-PnP XDDM mirror driver.
+;
 ; Platform: XP / Win7 (< Win8). Win8+ rejects XDDM mirror drivers.
 
 [Version]
@@ -18,18 +21,20 @@ DefaultDestDir   = 11
 mirror.Miniport  = 12  ; drivers
 mirror.Display   = 11  ; system32
 
-; ---- Driver information ----
+; ---- DefaultInstall: right-click "Install" entry point ----
+; AddService flags 0x00000002 = SPSVCINST_ASSOCSERVICE (associate the service
+; with this inf's device/class). Service start type is SYSTEM_START so the
+; mirror driver loads at boot and attaches to the desktop.
 
-[Manufacturer]
-%ProviderName% = Mirror.Mfg
-
-[Mirror.Mfg]
-%DeviceDesc% = mirror, EasyRDP_Mirror
-
-; ---- General installation section ----
-
-[mirror]
+[DefaultInstall]
 CopyFiles=mirror.Miniport, mirror.Display
+AddReg=mirror_SoftwareDeviceSettings, mirror_EventLog_AddReg
+
+[DefaultInstall.Services]
+AddService = mirror, 0x00000002, mirror_Service_Inst
+
+[DefaultInstall.HW]
+AddReg=mirror_Device_HW
 
 ; ---- File sections ----
 
@@ -41,9 +46,6 @@ mirror.dll
 
 ; ---- Service Installation ----
 
-[mirror.Services]
-AddService = mirror, 0x00000002, mirror_Service_Inst, mirror_EventLog_Inst
-
 [mirror_Service_Inst]
 ServiceType    = 1                  ; SERVICE_KERNEL_DRIVER
 StartType      = 1                  ; SERVICE_SYSTEM_START
@@ -51,17 +53,11 @@ ErrorControl   = 0                  ; SERVICE_ERROR_IGNORE
 LoadOrderGroup = Video
 ServiceBinary  = %12%\mirror_m.sys
 
-[mirror_EventLog_Inst]
-AddReg = mirror_EventLog_AddReg
-
 [mirror_EventLog_AddReg]
 HKR,,EventMessageFile,0x00020000,"%SystemRoot%\System32\IoLogMsg.dll;%SystemRoot%\System32\drivers\mirror_m.sys"
 HKR,,TypesSupported,0x00010001,7
 
-; ---- Software Installation ----
-
-[mirror.SoftwareSettings]
-AddReg = mirror_SoftwareDeviceSettings
+; ---- Software Device Settings ----
 
 ; Key settings that attach the mirror driver to the global desktop:
 ; InstalledDisplayDrivers=mirror points GDI at our display DLL.
@@ -69,6 +65,9 @@ AddReg = mirror_SoftwareDeviceSettings
 HKR,, MirrorDriver,                %REG_DWORD%,    1
 HKR,, InstalledDisplayDrivers,     %REG_MULTI_SZ%, mirror
 HKR,, VgaCompatible,               %REG_DWORD%,    0
+HKR,, Attach.ToDesktop,            %REG_DWORD%,    1
+
+[mirror_Device_HW]
 HKR,, Attach.ToDesktop,            %REG_DWORD%,    1
 
 [mirror.GeneralConfigData]

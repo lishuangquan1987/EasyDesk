@@ -41,17 +41,21 @@ build
 
 ## 安装驱动
 
-在目标机（XP/Win7）上：
+在目标机（XP/Win7）上，把 `mirror.dll`、`mirror_m.sys`、`install.bat`、`MirrorDriver.inf` 拷到一起，以**管理员**身份执行。
 
-1. 把 `mirror.dll`、`mirror_m.sys`、`inf/MirrorDriver.inf` 拷到一起
-2. 管理员命令提示符，两种方式任选：
-   - 图形：右键 `MirrorDriver.inf` → 安装
-   - 命令行：`RUNDLL32.EXE SETUPAPI.DLL,InstallHinfSection DefaultInstall 132 MirrorDriver.inf`
-3. 重启或 `sc start mirror` 启动驱动服务（inf 已设 `StartType=1` 系统自启）
-4. 验证：设备管理器「显示适配器」出现 EasyRDP Mirror，或
-   `sc query mirror` 状态为 RUNNING
+### 方式一（推荐）：`install.bat`
 
-> 卸载：设备管理器删除该设备，或 `sc delete mirror`。
+双击或以管理员运行 `install.bat`。它用 `sc create` + `reg add` 直接注册内核驱动服务和显示驱动配置（`InstalledDisplayDrivers=mirror`、`Attach.ToDesktop=1`），绕开 inf 对 Display 类驱动的右键限制。完成后**重启**，验证 `sc query mirror` 为 RUNNING。
+
+### 方式二：右键 `MirrorDriver.inf` → 安装
+
+inf 已含 `[DefaultInstall]` 节（右键安装的入口）。若系统接受则可用，否则请用方式一。
+
+### 验证
+- `sc query mirror` → 状态 RUNNING
+- 设备管理器「显示适配器」出现 EasyRDP Mirror
+
+> 卸载：`sc stop mirror` + `sc delete mirror`（需管理员），并删除 `%SystemRoot%\System32\drivers\mirror_m.sys` 与 `%SystemRoot%\System32\mirror.dll`。
 
 ## 编译（EasyDesk 客户端）
 
