@@ -1,29 +1,127 @@
 /*
- * MirrorMini.c — 最小化 miniport（MiniPort Driver）
+ * MirrorMini.c — EasyRDP video miniport driver
  *
- * 参考：微软 WDK7 (Version 7600) 示例 \src\video\miniport\mirror\mini\
+ * Reference: Microsoft WDK7 mirror driver sample
+ *   \src\video\miniport\mirror\mini\mirror.c
  *
- * XDDM 镜像驱动需要一对：display driver（MirrorDisp）在系统侧 + 一个 miniport
- * 驱动（本文件）提供硬件抽象层。镜像 miniport 不真正操作硬件，只提供注册的
- * 显示设备，使系统认为存在一个虚拟显示适配器，从而把 GDI 绘图派发给镜像
- * display driver。
+ * XDDM mirror driver needs a pair: the display driver (MirrorDisp, system
+ * side) + a miniport driver (this file) that provides the "hardware"
+ * abstraction. The mirror miniport does not touch real hardware; it just
+ * registers a virtual display adapter so the system enumerates it and routes
+ * GDI draw operations to the mirror display driver.
  *
- * 平台：XP / Win7（< Win8）。
+ * IMPORTANT: HwFindAdapter MUST be implemented and registered in DriverEntry.
+ * A miniport with only HwInitDataSize set (all callbacks NULL) fails to
+ * initialize -> driver load fails with WIN32_EXIT_CODE 31 (ERROR_GEN_FAILURE).
  *
- * 状态：骨架，需在 WDK7 编译验证。
+ * Platform: XP / Win7 (< Win8).
  */
 
 #include <miniport.h>
+#include <dderror.h>
 #include <ntddvdeo.h>
 #include <video.h>
 #include <string.h>
 
-/* 注意：视频 miniport 驱动正确 include：
- * miniport.h（内核基础）→ ntddvdeo.h（提供 PVIDEO_POWER_MANAGEMENT、
- * PVIDEO_HW_INITIALIZATION_DATA 等类型）→ video.h（依赖这些类型）。
- * 不要包含 ntddk.h（与 miniport.h 冲突），顺序不可颠倒。 */
+/* ---- callback stubs (mirror miniport does not touch real hardware) ---- */
 
-/* ---- DriverEntry：注册 HwVid 回调 ---- */
+VP_STATUS
+MirrorFindAdapter(
+    IN PVOID HwDeviceExtension,
+    IN PVOID HwContext,
+    IN PWSTR ArgumentString,
+    IN PVIDEO_PORT_CONFIG_INFO ConfigInfo,
+    OUT PUCHAR Again)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(HwContext);
+    UNREFERENCED_PARAMETER(ArgumentString);
+    UNREFERENCED_PARAMETER(ConfigInfo);
+    UNREFERENCED_PARAMETER(Again);
+    return NO_ERROR;
+}
+
+BOOLEAN
+MirrorInitialize(
+    PVOID HwDeviceExtension)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    return TRUE;
+}
+
+BOOLEAN
+MirrorStartIO(
+    PVOID HwDeviceExtension,
+    PVIDEO_REQUEST_PACKET RequestPacket)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(RequestPacket);
+    return TRUE;
+}
+
+BOOLEAN
+MirrorResetHw(
+    PVOID HwDeviceExtension,
+    ULONG Columns,
+    ULONG Rows)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(Columns);
+    UNREFERENCED_PARAMETER(Rows);
+    return TRUE;
+}
+
+BOOLEAN
+MirrorVidInterrupt(
+    PVOID HwDeviceExtension)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    return TRUE;
+}
+
+VP_STATUS
+MirrorGetPowerState(
+    PVOID HwDeviceExtension,
+    ULONG HwId,
+    PVIDEO_POWER_MANAGEMENT VideoPowerControl)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(HwId);
+    UNREFERENCED_PARAMETER(VideoPowerControl);
+    return NO_ERROR;
+}
+
+VP_STATUS
+MirrorSetPowerState(
+    PVOID HwDeviceExtension,
+    ULONG HwId,
+    PVIDEO_POWER_MANAGEMENT VideoPowerControl)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(HwId);
+    UNREFERENCED_PARAMETER(VideoPowerControl);
+    return NO_ERROR;
+}
+
+VP_STATUS
+MirrorGetChildDescriptor(
+    IN PVOID HwDeviceExtension,
+    IN PVIDEO_CHILD_ENUM_INFO ChildEnumInfo,
+    OUT PVIDEO_CHILD_TYPE pChildType,
+    OUT PVOID pChildDescriptor,
+    OUT PULONG pUId,
+    OUT PULONG pUnused)
+{
+    UNREFERENCED_PARAMETER(HwDeviceExtension);
+    UNREFERENCED_PARAMETER(ChildEnumInfo);
+    UNREFERENCED_PARAMETER(pChildType);
+    UNREFERENCED_PARAMETER(pChildDescriptor);
+    UNREFERENCED_PARAMETER(pUId);
+    UNREFERENCED_PARAMETER(pUnused);
+    return ERROR_NO_MORE_DEVICES;
+}
+
+/* ---- DriverEntry: register HwVid callbacks ---- */
 
 ULONG
 DriverEntry(
@@ -33,13 +131,19 @@ DriverEntry(
     VIDEO_HW_INITIALIZATION_DATA HwInitData;
 
     memset(&HwInitData, 0, sizeof(VIDEO_HW_INITIALIZATION_DATA));
+
     HwInitData.HwInitDataSize = sizeof(VIDEO_HW_INITIALIZATION_DATA);
-    /* 镜像 miniport 不需要真正访问硬件；以下回调在 WDK7 示例中多为空或占位。
-     * 关键：设置 HwFindAdapter 以被系统枚举到。 */
-    /* HwInitData.HwFindAdapter = MirrorHwFindAdapter;
-     * HwInitData.HwInitialize = MirrorHwInitialize;
-     * HwInitData.HwStartIO = MirrorHwStartIO;
-     * ... */
+
+    /* Set entry points. HwFindAdapter is REQUIRED for the miniport to be
+     * enumerated; a NULL find-adapter causes VideoPortInitialize to fail. */
+    HwInitData.HwFindAdapter             = &MirrorFindAdapter;
+    HwInitData.HwInitialize              = &MirrorInitialize;
+    HwInitData.HwStartIO                 = &MirrorStartIO;
+    HwInitData.HwResetHw                 = &MirrorResetHw;
+    HwInitData.HwInterrupt               = &MirrorVidInterrupt;
+    HwInitData.HwGetPowerState           = &MirrorGetPowerState;
+    HwInitData.HwSetPowerState           = &MirrorSetPowerState;
+    HwInitData.HwGetVideoChildDescriptor = &MirrorGetChildDescriptor;
 
     return (ULONG)VideoPortInitialize(Context1, Context2, &HwInitData, NULL);
 }
