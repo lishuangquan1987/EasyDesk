@@ -59,25 +59,36 @@ call C:\WinDDK\7600.16385.1\bin\setenv.bat C:\WinDDK\7600.16385.1 chk x64
 - x86：`MirrorDisp/objchk_wxp_x86/i386/mirror.dll`、`MirrorMini/objchk_wxp_x86/i386/mirror_m.sys`
 - x64：`MirrorDisp/objchk_win7_amd64/amd64/mirror.dll`、`MirrorMini/objchk_win7_amd64/amd64/mirror_m.sys`
 
-> ⚠️ 驱动签名：**XP 32 位免签**；**Win7 64 位必须开测试签名**（管理员 `bcdedit /set testsigning on` + 重启）或做 WHQL 签名，否则未签名驱动被拒加载。另：64 位 Windows 只能加载 64 位驱动，务必用 x64 编译产物。
+> ⚠️ 驱动签名：**XP 32 位免签**；**Win7 64 位必须开测试签名 + 用测试证书给驱动签名**，否则驱动加载失败（`sc start` 报 577「无法验证数字签名」）。流程见下。
 
-## 安装驱动
+## 安装驱动（完整流程，按序执行）
 
-把整个 `release/` 文件夹拷到目标机，以**管理员**运行 `release\install.bat`。脚本**自动检测系统位数**并选择对应驱动：
-- 32 位 → `x86\mirror.dll` + `x86\mirror_m.sys`
-- 64 位 → `x64\mirror64.dll` + `x64\mirror_m64.sys`
+把整个 `release/` 文件夹拷到目标机。**以下全部以管理员运行**。
 
-### 方式一（推荐）：`install.bat`
+### 第 1 步：开测试签名（仅 64 位 Win7 需要）
+```
+bcdedit /set testsigning on
+```
+然后**重启**。
 
-管理员运行 `install.bat`。它用 `sc create` + `reg add` 直接注册内核驱动服务和显示驱动配置（`InstalledDisplayDrivers=mirror`、`Attach.ToDesktop=1`）。完成后**重启**，验证 `sc query mirror` 为 RUNNING。
+### 第 2 步：给驱动签名（仅 64 位 Win7 需要）
+运行 `release\sign.bat`。它：
+1. 用 MakeCert 创建自签名测试证书（`easyrdp-test.cer`）
+2. 用 `certutil` 把证书装进「受信任的根证书颁发机构」存储
+3. 用 SignTool 给 `x64\`、`x86\` 下的驱动签名
 
-### 方式二：右键 `MirrorDriver.inf` → 安装
+> 若跳过此步，`sc start mirror` 会报 **577**（无法验证数字签名）。
 
-inf 已含 `[DefaultInstall]` 节。若系统接受则可用，否则请用方式一。
+### 第 3 步：安装驱动
+运行 `release\install.bat`。脚本自动检测位数选对应驱动，用 `sc create` + `reg add` 注册内核服务与显示配置（`InstalledDisplayDrivers=mirror`、`Attach.ToDesktop=1`）。
 
-### 验证
-- `sc query mirror` → 状态 RUNNING
-- 设备管理器「显示适配器」出现 EasyRDP Mirror
+### 第 4 步：重启并验证
+重启后 `sc query mirror` 应为 **RUNNING**。
+
+> 卸载：`sc stop mirror` + `sc delete mirror`，删除 `%SystemRoot%\System32\drivers\mirror_m*.sys` 与 `%SystemRoot%\System32\mirror*.dll`。
+
+### 备选：右键 `MirrorDriver.inf` → 安装
+inf 已含 `[DefaultInstall]` 节。若系统接受则可用，否则请用 `install.bat`。
 
 > 卸载：`sc stop mirror` + `sc delete mirror`（需管理员），并删除 `%SystemRoot%\System32\drivers\mirror_m.sys` 与 `%SystemRoot%\System32\mirror.dll`。
 
