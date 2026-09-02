@@ -1,154 +1,43 @@
-/*
- * MirrorDisp.c - EasyRDP XDDM mirror display driver
- *
- * Based on the Microsoft WDK7 mirror driver sample
- *   \src\video\displays\mirror\disp\
- * Adapted for EasyRDP dirty-rectangle capture on XP/Win7.
- *
- * GDI desktop draw operations intersecting the mirror surface are dispatched
- * to this driver's Drv* callbacks; we record the affected rectangles into a
- * shared ring buffer so the user-mode client (MirrorScreenCapturer) only
- * processes changed regions.
- *
- * All DDI callback signatures must match winddi.h exactly (they are declared
- * there). Platform: XDDM display driver, XP/Win7 only (< Win8).
- */
+/******************************Module*Header*******************************\
+*
+* Module Name: MirrorDisp.c
+*
+* EasyRDP XDDM mirror display driver.
+* Based on the Microsoft WDK7 mirror driver sample
+*   \src\video\displays\mirror\disp\
+*
+* The GDI desktop draw operations intersecting the mirror surface are
+* dispatched to this driver's Drv* callbacks; we both (a) forward them to
+* the engine (EngBitBlt/EngTextOut/...) so the pixels are really rendered
+* into the mapped mirror surface file, and (b) record the affected
+* rectangles into a shared ring buffer so the user-mode client
+* (MirrorScreenCapturer) only processes changed regions.
+*
+* Platform: XDDM display driver, XP/Win7 only (< Win8).
+*
+\**************************************************************************/
 
 #include "driver.h"
 
-/* ---- DDI callbacks (signatures from winddi.h) ---- */
-
-DHPDEV APIENTRY
-DrvEnablePDEV(
-    DEVMODEW *pdm,
-    LPWSTR pwszLogAddress,
-    ULONG cPat,
-    HSURF *phsurfPatterns,
-    ULONG cjCaps,
-    ULONG *pdevcaps,
-    ULONG cjDevInfo,
-    DEVINFO *pdi,
-    HDEV hdev,
-    LPWSTR pwszDeviceName,
-    HANDLE hDriver)
+static DRVFN gadrvfn[] =
 {
-    PPDEV pdev;
-    ULONG changesSize;
-    GDIINFO *pGdi;
-    PDEVINFO pdiOut;
-
-    pdev = (PPDEV)EngAllocMem(FL_ZERO_MEMORY, sizeof(PDEV), ALLOC_TAG);
-    if (pdev == NULL)
-        return NULL;
-
-    pdev->cxScreen = pdm->dmPelsWidth;
-    pdev->cyScreen = pdm->dmPelsHeight;
-    pdev->ChangesCapacity = MIRROR_DEFAULT_CAPACITY;
-
-    changesSize = sizeof(MIRROR_CHANGES_HEADER)
-                  + (MIRROR_DEFAULT_CAPACITY - 1) * sizeof(MIRROR_CHANGES_RECORD);
-    pdev->ChangesSize = changesSize;
-
-    pdev->pChanges = (MIRROR_CHANGES_HEADER *)EngAllocMem(
-        FL_ZERO_MEMORY, changesSize, ALLOC_TAG);
-    if (pdev->pChanges == NULL)
-    {
-        EngFreeMem(pdev);
-        return NULL;
-    }
-    pdev->pChanges->Capacity = MIRROR_DEFAULT_CAPACITY;
-
-    /* Fill GDIINFO */
-    if (cjCaps >= sizeof(GDIINFO))
-    {
-        pGdi = (GDIINFO *)pdevcaps;
-        RtlZeroMemory(pGdi, sizeof(GDIINFO));
-        pGdi->ulVersion = 0;
-        pGdi->ulHorzRes = pdm->dmPelsWidth;
-        pGdi->ulVertRes = pdm->dmPelsHeight;
-        pGdi->ulHorzSize = pdm->dmPelsWidth;
-        pGdi->ulVertSize = pdm->dmPelsHeight;
-        pGdi->ulLogPixelsX = pdm->dmLogPixels;
-        pGdi->ulLogPixelsY = pdm->dmLogPixels;
-    }
-
-    /* Fill DEVINFO */
-    if (cjDevInfo >= sizeof(DEVINFO))
-    {
-        pdiOut = (PDEVINFO)pdi;
-        RtlZeroMemory(pdiOut, sizeof(DEVINFO));
-        pdiOut->flGraphicsCaps = GCAPS_DIRECTDRAW;
-        pdiOut->iDitherFormat = BMF_32BPP;
-    }
-
-    return (DHPDEV)pdev;
-}
-
-VOID APIENTRY
-DrvCompletePDEV(
-    DHPDEV dhpdev,
-    HDEV hdev)
-{
-}
-
-VOID APIENTRY
-DrvDisablePDEV(
-    DHPDEV dhpdev)
-{
-    PPDEV pdev = (PPDEV)dhpdev;
-    if (pdev != NULL)
-    {
-        if (pdev->pChanges != NULL)
-            EngFreeMem(pdev->pChanges);
-        EngFreeMem(pdev);
-    }
-}
-
-HSURF APIENTRY
-DrvEnableSurface(
-    DHPDEV dhpdev)
-{
-    SIZEL sizl;
-    HSURF hsurf;
-
-    sizl.cx = 1;
-    sizl.cy = 1;
-    hsurf = EngCreateBitmap(sizl, 4, BMF_32BPP, BMF_TOPDOWN, NULL);
-    if (hsurf == NULL)
-        return NULL;
-    EngAssociateSurface(hsurf, ((PPDEV)dhpdev)->hdevEng, 0);
-    return hsurf;
-}
-
-VOID APIENTRY
-DrvDisableSurface(
-    DHPDEV dhpdev)
-{
-}
-
-BOOL APIENTRY
-DrvAssertMode(
-    DHPDEV dhpdev,
-    BOOL bEnable)
-{
-    return TRUE;
-}
-
-BOOL APIENTRY
-DrvResetPDEV(
-    DHPDEV dhpdevOld,
-    DHPDEV dhpdevNew)
-{
-    return TRUE;
-}
-
-VOID APIENTRY
-DrvNotify(
-    SURFOBJ *pso,
-    ULONG iType,
-    PVOID pvData)
-{
-}
+    { INDEX_DrvEnablePDEV,            (PFN) DrvEnablePDEV         },
+    { INDEX_DrvCompletePDEV,          (PFN) DrvCompletePDEV       },
+    { INDEX_DrvDisablePDEV,           (PFN) DrvDisablePDEV        },
+    { INDEX_DrvEnableSurface,         (PFN) DrvEnableSurface      },
+    { INDEX_DrvDisableSurface,        (PFN) DrvDisableSurface     },
+    { INDEX_DrvAssertMode,            (PFN) DrvAssertMode         },
+    { INDEX_DrvNotify,                (PFN) DrvNotify             },
+    { INDEX_DrvTextOut,               (PFN) DrvTextOut            },
+    { INDEX_DrvBitBlt,                (PFN) DrvBitBlt             },
+    { INDEX_DrvCopyBits,              (PFN) DrvCopyBits           },
+    { INDEX_DrvStrokePath,            (PFN) DrvStrokePath         },
+    { INDEX_DrvLineTo,                (PFN) DrvLineTo             },
+    { INDEX_DrvFillPath,              (PFN) DrvFillPath           },
+    { INDEX_DrvMovePointer,           (PFN) DrvMovePointer        },
+    { INDEX_DrvSetPointerShape,       (PFN) DrvSetPointerShape    },
+    { INDEX_DrvEscape,                (PFN) DrvEscape             }
+};
 
 /* ---- dirty-rectangle recording ---- */
 
@@ -189,253 +78,324 @@ MirrorLogChange(
     pHead->WriteIndex = next;
 }
 
-/* ---- Drv* draw callbacks ---- */
+/* ---- Driver enable/disable ---- */
 
-BOOL APIENTRY
-DrvCopyBits(
-    SURFOBJ *psoDest,
-    SURFOBJ *psoSrc,
-    CLIPOBJ *pco,
-    XLATEOBJ *pxlo,
-    RECTL *prclDest,
-    POINTL *pptlSrc)
+BOOL DrvEnableDriver(
+ULONG iEngineVersion,
+ULONG cj,
+PDRVENABLEDATA pded)
 {
-    if (prclDest != NULL)
-        MirrorLogChange((PPDEV)psoDest->dhpdev, prclDest);
+    iEngineVersion;
+    if (cj >= sizeof(DRVENABLEDATA))
+        pded->pdrvfn = gadrvfn;
+    if (cj >= (sizeof(ULONG) * 2))
+        pded->c = sizeof(gadrvfn) / sizeof(DRVFN);
+    if (cj >= sizeof(ULONG))
+        pded->iDriverVersion = DDI_DRIVER_VERSION_NT4;
     return TRUE;
 }
 
-BOOL APIENTRY
-DrvBitBlt(
-    SURFOBJ *psoTrg,
-    SURFOBJ *psoSrc,
-    SURFOBJ *psoMask,
-    CLIPOBJ *pco,
-    XLATEOBJ *pxlo,
-    RECTL *prclTrg,
-    POINTL *pptlSrc,
-    POINTL *pptlMask,
-    BRUSHOBJ *pbo,
-    POINTL *pptlBrush,
-    ROP4 rop4)
+DHPDEV
+DrvEnablePDEV(
+    DEVMODEW   *pDevmode,
+    PWSTR       pwszLogAddress,
+    ULONG       cPatterns,
+    HSURF      *ahsurfPatterns,
+    ULONG       cjGdiInfo,
+    ULONG      *pGdiInfo,
+    ULONG       cjDevInfo,
+    DEVINFO    *pDevInfo,
+    HDEV        hdev,
+    PWSTR       pwszDeviceName,
+    HANDLE      hDriver)
 {
-    if (prclTrg != NULL)
-        MirrorLogChange((PPDEV)psoTrg->dhpdev, prclTrg);
+    GDIINFO GdiInfo;
+    DEVINFO DevInfo;
+    PPDEV   ppdev;
+    ULONG   changesSize;
+
+    UNREFERENCED_PARAMETER(pwszLogAddress);
+    UNREFERENCED_PARAMETER(cPatterns);
+    UNREFERENCED_PARAMETER(ahsurfPatterns);
+    UNREFERENCED_PARAMETER(hdev);
+    UNREFERENCED_PARAMETER(pwszDeviceName);
+
+    ppdev = (PPDEV) EngAllocMem(FL_ZERO_MEMORY, sizeof(PDEV), ALLOC_TAG);
+    if (ppdev == NULL)
+        return (DHPDEV)0;
+
+    ppdev->hDriver = hDriver;
+
+    if (!bInitPDEV(ppdev, pDevmode, &GdiInfo, &DevInfo))
+    {
+        EngFreeMem(ppdev);
+        return (DHPDEV)0;
+    }
+
+    /* Allocate the shared dirty-rect ring buffer. */
+    ppdev->ChangesCapacity = MIRROR_DEFAULT_CAPACITY;
+    changesSize = sizeof(MIRROR_CHANGES_HEADER)
+                  + (MIRROR_DEFAULT_CAPACITY - 1) * sizeof(MIRROR_CHANGES_RECORD);
+    ppdev->ChangesSize = changesSize;
+    ppdev->pChanges = (MIRROR_CHANGES_HEADER *)EngAllocMem(
+        FL_ZERO_MEMORY, changesSize, ALLOC_TAG);
+    if (ppdev->pChanges == NULL)
+    {
+        EngFreeMem(ppdev);
+        return (DHPDEV)0;
+    }
+    ppdev->pChanges->Capacity = MIRROR_DEFAULT_CAPACITY;
+
+    if (sizeof(DEVINFO) > cjDevInfo)
+    {
+        EngFreeMem(ppdev->pChanges);
+        EngFreeMem(ppdev);
+        return (DHPDEV)0;
+    }
+    RtlCopyMemory(pDevInfo, &DevInfo, sizeof(DEVINFO));
+
+    if (sizeof(GDIINFO) > cjGdiInfo)
+    {
+        EngFreeMem(ppdev->pChanges);
+        EngFreeMem(ppdev);
+        return (DHPDEV)0;
+    }
+    RtlCopyMemory(pGdiInfo, &GdiInfo, sizeof(GDIINFO));
+
+    return (DHPDEV)ppdev;
+}
+
+VOID DrvCompletePDEV(
+DHPDEV dhpdev,
+HDEV  hdev)
+{
+    ((PPDEV)dhpdev)->hdevEng = hdev;
+}
+
+VOID DrvDisablePDEV(
+DHPDEV dhpdev)
+{
+    PPDEV ppdev = (PPDEV)dhpdev;
+
+    if (ppdev->hpalDefault)
+        EngDeletePalette(ppdev->hpalDefault);
+    if (ppdev->pChanges)
+        EngFreeMem(ppdev->pChanges);
+    if (ppdev->pMappedFile)
+        EngUnmapFile(ppdev->pMappedFile);
+    if (ppdev->pvTmpBuffer)
+        EngDeleteFile(MIRROR_SURFACE_FILE);
+    EngFreeMem(dhpdev);
+}
+
+HSURF DrvEnableSurface(
+DHPDEV dhpdev)
+{
+    PPDEV ppdev = (PPDEV)dhpdev;
+    HSURF hsurf;
+    SIZEL sizl;
+    ULONG ulBitmapType;
+    FLONG flHooks;
+    ULONG mirrorsize;
+
+    ppdev->ptlOrg.x = 0;
+    ppdev->ptlOrg.y = 0;
+
+    sizl.cx = ppdev->cxScreen;
+    sizl.cy = ppdev->cyScreen;
+
+    ulBitmapType = BMF_32BPP;
+    flHooks = HOOKS_BMF32BPP;
+    flHooks |= flGlobalHooks;
+
+    mirrorsize = (ULONG)(ppdev->cxScreen * ppdev->cyScreen * 4);
+    ppdev->lDeltaScreen = ppdev->cxScreen * 4;
+
+    ppdev->pvTmpBuffer = EngMapFile(MIRROR_SURFACE_FILE,
+                    mirrorsize,
+                    &ppdev->pMappedFile);
+    if (ppdev->pvTmpBuffer == NULL)
+        return FALSE;
+
+    hsurf = (HSURF) EngCreateBitmap(sizl,
+                                        ppdev->lDeltaScreen,
+                                        ulBitmapType,
+                                        0,
+                                        (PVOID)(ppdev->pvTmpBuffer));
+    if (hsurf == (HSURF)0)
+    {
+        return FALSE;
+    }
+
+    if (!EngAssociateSurface(hsurf, ppdev->hdevEng, flHooks))
+    {
+        EngDeleteSurface(hsurf);
+        return FALSE;
+    }
+
+    ppdev->hsurfEng = hsurf;
+    return hsurf;
+}
+
+VOID DrvDisableSurface(
+DHPDEV dhpdev)
+{
+    PPDEV ppdev = (PPDEV)dhpdev;
+    if (ppdev->hsurfEng)
+        EngDeleteSurface(ppdev->hsurfEng);
+    ppdev->hsurfEng = NULL;
+}
+
+BOOL DrvAssertMode(
+DHPDEV dhpdev,
+BOOL bEnable)
+{
+    UNREFERENCED_PARAMETER(dhpdev);
+    UNREFERENCED_PARAMETER(bEnable);
     return TRUE;
 }
 
-BOOL APIENTRY
-DrvTextOut(
-    SURFOBJ *pso,
-    STROBJ *pstro,
-    FONTOBJ *pfo,
-    CLIPOBJ *pco,
-    RECTL *prclExtra,
-    RECTL *prclOpaque,
-    BRUSHOBJ *pboFore,
-    BRUSHOBJ *pboOpaque,
-    POINTL *pptlOrg,
-    MIX mix)
+VOID DrvNotify(
+SURFOBJ *pso,
+ULONG iType,
+PVOID pvData)
+{
+    UNREFERENCED_PARAMETER(pso);
+    UNREFERENCED_PARAMETER(iType);
+    UNREFERENCED_PARAMETER(pvData);
+}
+
+/* ---- draw callbacks: forward to engine AND record dirty rects ---- */
+
+BOOL DrvCopyBits(
+   SURFOBJ *psoDst,
+   SURFOBJ *psoSrc,
+   CLIPOBJ *pco,
+   XLATEOBJ *pxlo,
+   RECTL *prclDst,
+   POINTL *pptlSrc)
+{
+    if (prclDst != NULL)
+        MirrorLogChange((PPDEV)psoDst->dhpdev, prclDst);
+    return EngCopyBits(psoDst, psoSrc, pco, pxlo, prclDst, pptlSrc);
+}
+
+BOOL DrvBitBlt(
+   SURFOBJ *psoDst,
+   SURFOBJ *psoSrc,
+   SURFOBJ *psoMask,
+   CLIPOBJ *pco,
+   XLATEOBJ *pxlo,
+   RECTL *prclDst,
+   POINTL *pptlSrc,
+   POINTL *pptlMask,
+   BRUSHOBJ *pbo,
+   POINTL *pptlBrush,
+   ROP4 rop4)
+{
+    if (prclDst != NULL)
+        MirrorLogChange((PPDEV)psoDst->dhpdev, prclDst);
+    return EngBitBlt(psoDst, psoSrc, psoMask, pco, pxlo,
+                     prclDst, pptlSrc, pptlMask, pbo, pptlBrush, rop4);
+}
+
+BOOL DrvTextOut(
+   SURFOBJ *psoDst,
+   STROBJ *pstro,
+   FONTOBJ *pfo,
+   CLIPOBJ *pco,
+   RECTL *prclExtra,
+   RECTL *prclOpaque,
+   BRUSHOBJ *pboFore,
+   BRUSHOBJ *pboOpaque,
+   POINTL *pptlOrg,
+   MIX mix)
 {
     if (prclOpaque != NULL)
-        MirrorLogChange((PPDEV)pso->dhpdev, prclOpaque);
-    return TRUE;
+        MirrorLogChange((PPDEV)psoDst->dhpdev, prclOpaque);
+    return EngTextOut(psoDst, pstro, pfo, pco, prclExtra,
+                      prclOpaque, pboFore, pboOpaque, pptlOrg, mix);
 }
 
-BOOL APIENTRY
-DrvStretchBlt(
-    SURFOBJ *psoDest,
-    SURFOBJ *psoSrc,
-    SURFOBJ *psoMask,
-    CLIPOBJ *pco,
-    XLATEOBJ *pxlo,
-    COLORADJUSTMENT *pca,
-    POINTL *pptlHTOrg,
-    RECTL *prclDest,
-    RECTL *prclSrc,
-    POINTL *pptlMask,
-    ULONG iMode)
+BOOL DrvStrokePath(
+SURFOBJ*   pso,
+PATHOBJ*   ppo,
+CLIPOBJ*   pco,
+XFORMOBJ*  pxo,
+BRUSHOBJ*  pbo,
+POINTL*    pptlBrush,
+LINEATTRS* pLineAttrs,
+MIX        mix)
 {
-    if (prclDest != NULL)
-        MirrorLogChange((PPDEV)psoDest->dhpdev, prclDest);
-    return TRUE;
+    return EngStrokePath(pso, ppo, pco, pxo, pbo, pptlBrush, pLineAttrs, mix);
 }
 
-/* ---- remaining DDI stubs (mirror drivers don't render) ---- */
-
-BOOL APIENTRY
-DrvStrokePath(
-    SURFOBJ *pso,
-    PATHOBJ *ppo,
-    CLIPOBJ *pco,
-    XFORMOBJ *pxo,
-    BRUSHOBJ *pbo,
-    POINTL *pptlBrushOrg,
-    LINEATTRS *plineattrs,
-    MIX mix)
+BOOL DrvLineTo(
+SURFOBJ   *pso,
+CLIPOBJ   *pco,
+BRUSHOBJ  *pbo,
+LONG       x1,
+LONG       y1,
+LONG       x2,
+LONG       y2,
+RECTL     *prclBounds,
+MIX        mix)
 {
-    return TRUE;
+    if (prclBounds != NULL)
+        MirrorLogChange((PPDEV)pso->dhpdev, prclBounds);
+    return EngLineTo(pso, pco, pbo, x1, y1, x2, y2, prclBounds, mix);
 }
 
-BOOL APIENTRY
-DrvFillPath(
-    SURFOBJ *pso,
-    PATHOBJ *ppo,
-    CLIPOBJ *pco,
-    BRUSHOBJ *pbo,
-    POINTL *pptlBrushOrg,
-    MIX mix,
-    FLONG flOptions)
+BOOL DrvFillPath(
+SURFOBJ  *pso,
+PATHOBJ  *ppo,
+CLIPOBJ  *pco,
+BRUSHOBJ *pbo,
+PPOINTL   pptlBrushOrg,
+MIX       mix,
+FLONG     flOptions)
 {
-    return TRUE;
+    return EngFillPath(pso, ppo, pco, pbo, pptlBrushOrg, mix, flOptions);
 }
 
-BOOL APIENTRY
-DrvLineTo(
-    SURFOBJ *pso,
-    CLIPOBJ *pco,
-    BRUSHOBJ *pbo,
-    LONG x1,
-    LONG y1,
-    LONG x2,
-    LONG y2,
-    RECTL *prclBounds,
-    MIX mix)
+ULONG DrvEscape(
+SURFOBJ *pso,
+ULONG iEsc,
+ULONG cjIn,
+PVOID pvIn,
+ULONG cjOut,
+PVOID pvOut)
 {
-    return TRUE;
-}
-
-ULONG APIENTRY
-DrvDitherColor(
-    DHPDEV dhpdev,
-    ULONG iMode,
-    ULONG rgb,
-    ULONG *pul)
-{
+    UNREFERENCED_PARAMETER(cjIn);
+    UNREFERENCED_PARAMETER(pvIn);
+    UNREFERENCED_PARAMETER(cjOut);
+    UNREFERENCED_PARAMETER(pvOut);
+    UNREFERENCED_PARAMETER(pso);
+    UNREFERENCED_PARAMETER(iEsc);
     return 0;
 }
 
-BOOL APIENTRY
-DrvRealizeBrush(
-    BRUSHOBJ *pbo,
-    SURFOBJ *psoTarget,
-    SURFOBJ *psoPattern,
-    SURFOBJ *psoMask,
-    XLATEOBJ *pxlo,
-    ULONG iHatch)
+void DrvMovePointer(SURFOBJ *pso, LONG x, LONG y, RECTL *prcl)
 {
-    return TRUE;
+    UNREFERENCED_PARAMETER(pso);
+    UNREFERENCED_PARAMETER(x);
+    UNREFERENCED_PARAMETER(y);
+    UNREFERENCED_PARAMETER(prcl);
 }
 
-ULONG APIENTRY
-DrvSetPointerShape(
-    SURFOBJ *pso,
-    SURFOBJ *psoMask,
-    SURFOBJ *psoColor,
-    XLATEOBJ *pxlo,
-    LONG xHot,
-    LONG yHot,
-    LONG x,
-    LONG y,
-    RECTL *prcl,
-    FLONG fl)
+ULONG DrvSetPointerShape(SURFOBJ *pso, SURFOBJ *psoMask, SURFOBJ *psoColor,
+                         XLATEOBJ *pxlo, LONG xHot, LONG yHot,
+                         LONG x, LONG y, RECTL *prcl, FLONG fl)
 {
-    return SPS_DECLINE;
-}
-
-VOID APIENTRY
-DrvMovePointer(
-    SURFOBJ *pso,
-    LONG x,
-    LONG y,
-    RECTL *prcl)
-{
-}
-
-VOID APIENTRY
-DrvSynchronize(
-    DHPDEV dhpdev,
-    RECTL *prcl)
-{
-}
-
-BOOL APIENTRY
-DrvSetPalette(
-    DHPDEV dhpdev,
-    PALOBJ *ppalo,
-    FLONG fl,
-    ULONG iStart,
-    ULONG cColors)
-{
-    return TRUE;
-}
-
-BOOL APIENTRY
-DrvSetPixelFormat(
-    SURFOBJ *pso,
-    LONG iPixelFormat,
-    HWND hwnd)
-{
-    return TRUE;
-}
-
-HBITMAP APIENTRY
-DrvCreateDeviceBitmap(
-    DHPDEV dhpdev,
-    SIZEL sizl,
-    ULONG iFormat)
-{
-    return NULL;
-}
-
-VOID APIENTRY
-DrvDeleteDeviceBitmap(
-    DHSURF dhsurf)
-{
-}
-
-/* ---- DDI function table + DrvEnableDriver ---- */
-
-BOOL APIENTRY
-DrvEnableDriver(
-    ULONG iEngineVersion,
-    ULONG cj,
-    DRVENABLEDATA *pded)
-{
-    static DRVFN gadrvfn[] =
-    {
-        { INDEX_DrvEnablePDEV,        (PFN)DrvEnablePDEV        },
-        { INDEX_DrvCompletePDEV,      (PFN)DrvCompletePDEV      },
-        { INDEX_DrvDisablePDEV,       (PFN)DrvDisablePDEV       },
-        { INDEX_DrvEnableSurface,     (PFN)DrvEnableSurface     },
-        { INDEX_DrvDisableSurface,    (PFN)DrvDisableSurface    },
-        { INDEX_DrvAssertMode,        (PFN)DrvAssertMode        },
-        { INDEX_DrvTextOut,           (PFN)DrvTextOut           },
-        { INDEX_DrvBitBlt,            (PFN)DrvBitBlt            },
-        { INDEX_DrvCopyBits,          (PFN)DrvCopyBits          },
-        { INDEX_DrvStretchBlt,        (PFN)DrvStretchBlt        },
-        { INDEX_DrvStrokePath,        (PFN)DrvStrokePath        },
-        { INDEX_DrvFillPath,          (PFN)DrvFillPath          },
-        { INDEX_DrvLineTo,            (PFN)DrvLineTo            },
-        { INDEX_DrvDitherColor,       (PFN)DrvDitherColor       },
-        { INDEX_DrvRealizeBrush,      (PFN)DrvRealizeBrush      },
-        { INDEX_DrvSetPalette,        (PFN)DrvSetPalette        },
-        { INDEX_DrvSetPixelFormat,    (PFN)DrvSetPixelFormat    },
-        { INDEX_DrvCreateDeviceBitmap,(PFN)DrvCreateDeviceBitmap},
-        { INDEX_DrvDeleteDeviceBitmap,(PFN)DrvDeleteDeviceBitmap},
-        { INDEX_DrvSetPointerShape,   (PFN)DrvSetPointerShape   },
-        { INDEX_DrvMovePointer,       (PFN)DrvMovePointer       },
-        { INDEX_DrvSynchronize,       (PFN)DrvSynchronize       },
-        { INDEX_DrvResetPDEV,         (PFN)DrvResetPDEV         },
-        { INDEX_DrvNotify,            (PFN)DrvNotify            },
-    };
-
-    if (pded == NULL)
-        return FALSE;
-
-    pded->pdrvfn = gadrvfn;
-    pded->c = sizeof(gadrvfn) / sizeof(gadrvfn[0]);
-    pded->iDriverVersion = DDI_DRIVER_VERSION_NT4;
-
-    return TRUE;
+    UNREFERENCED_PARAMETER(pso);
+    UNREFERENCED_PARAMETER(psoMask);
+    UNREFERENCED_PARAMETER(psoColor);
+    UNREFERENCED_PARAMETER(pxlo);
+    UNREFERENCED_PARAMETER(xHot);
+    UNREFERENCED_PARAMETER(yHot);
+    UNREFERENCED_PARAMETER(x);
+    UNREFERENCED_PARAMETER(y);
+    UNREFERENCED_PARAMETER(prcl);
+    UNREFERENCED_PARAMETER(fl);
+    return SPS_ACCEPT_NOEXCLUDE;
 }

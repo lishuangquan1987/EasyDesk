@@ -2,13 +2,13 @@
 REM ============================================================
 REM EasyRDP Mirror Driver - sign driver with a test certificate
 REM
-REM Creates a self-signed test certificate and signs the driver
-REM binaries. Required on 64-bit Win7 (or any 64-bit Windows) where
-REM kernel drivers must be signed; with testsigning enabled, a driver
-REM signed by a test cert will load.
+REM Creates a self-signed test certificate (CurrentUser My store) and
+REM signs the driver binaries. Required on 64-bit Win7 where kernel
+REM drivers must be signed; with testsigning enabled, a driver signed
+REM by a test cert will load.
 REM
-REM Run as Administrator on the target machine.
-REM Usage:  sign.bat   (signs the binaries in x86\ and x64\)
+REM Run as Administrator on the BUILD machine (needs WDK 7.1).
+REM The signed binaries in x86\ and x64\ are then copied to the target.
 REM ============================================================
 setlocal
 
@@ -25,26 +25,22 @@ if not exist "%MK%" (
   exit /b 1
 )
 
-echo === Creating self-signed test certificate ===
-"%MK%" -r -pe -ss My -sr LocalMachine -n "%SUBJ%" "%CERT%" || goto :fail
+echo === Creating self-signed test certificate (CurrentUser My) ===
+"%MK%" -r -pe -ss My -n "%SUBJ%" "%CERT%" || goto :fail
 
-echo === Trusting the test certificate (install to Root store) ===
-certutil -addstore Root "%CERT%" || goto :fail
-
-echo.
 echo === Signing x64 driver ===
-"%SG%" sign /a /s My /sr LocalMachine /n "EasyRDP Test" "%SRC%x64\mirror_m64.sys" || goto :fail
-"%SG%" sign /a /s My /sr LocalMachine /n "EasyRDP Test" "%SRC%x64\mirror64.dll" || goto :fail
+"%SG%" sign /a /s My /n "EasyRDP Test" "%SRC%x64\mirror_m64.sys" || goto :fail
+"%SG%" sign /a /s My /n "EasyRDP Test" "%SRC%x64\mirror64.dll" || goto :fail
 
 echo.
 echo === Signing x86 driver ===
-"%SG%" sign /a /s My /sr LocalMachine /n "EasyRDP Test" "%SRC%x86\mirror_m.sys" || goto :fail
-"%SG%" sign /a /s My /sr LocalMachine /n "EasyRDP Test" "%SRC%x86\mirror.dll" || goto :fail
+"%SG%" sign /a /s My /n "EasyRDP Test" "%SRC%x86\mirror_m.sys" || goto :fail
+"%SG%" sign /a /s My /n "EasyRDP Test" "%SRC%x86\mirror.dll" || goto :fail
 
 echo.
 echo === Signing complete ===
-echo Verify with:  signtool verify /pa x64\mirror_m64.sys
-echo Then run install.bat and reboot.
+echo Then on the TARGET machine run trust.bat (install easyrdp-test.cer
+echo into the root store) and install.bat, then reboot.
 goto :end
 
 :fail

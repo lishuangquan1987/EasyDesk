@@ -50,14 +50,33 @@ typedef struct _MIRROR_CHANGES_HEADER
 
 #define MIRROR_DEFAULT_CAPACITY 4096
 
-typedef struct _PDEV
+/*
+ * Mirror surface pixel buffer: the driver renders the desktop into this
+ * mapped file, and the user-mode client reads it (like the WDK sample's
+ * c:\video.dat). EasyRDP uses \??\c:\easyrdp-mirror.bin.
+ */
+#define MIRROR_SURFACE_FILE  L"\\??\\c:\\easyrdp-mirror.bin"
+
+typedef struct  _PDEV
 {
     HANDLE  hDriver;                    // Handle to \Device\Screen
     HDEV    hdevEng;                    // Engine's handle to PDEV
     HSURF   hsurfEng;                   // Engine's handle to surface
-
+    HPALETTE hpalDefault;               // Handle to the default palette
+    PBYTE   pjScreen;                   // pointer to base screen address
     ULONG   cxScreen;                   // Visible screen width
     ULONG   cyScreen;                   // Visible screen height
+    POINTL  ptlOrg;                     // Where this display is anchored
+    ULONG   ulMode;                     // Mode the mini-port driver is in
+    LONG    lDeltaScreen;               // Distance from one scan to the next
+    ULONG   cScreenSize;                // size of video memory
+    FLONG   flRed;                      // Red mask
+    FLONG   flGreen;                    // Green mask
+    FLONG   flBlue;                     // Blue mask
+    ULONG   ulBitCount;                 // bits per pel (32)
+
+    PVOID   pvTmpBuffer;                // ptr to MIRRSURF bits for screen surface
+    ULONG_PTR pMappedFile;              // handle of the mapped surface file
 
     MIRROR_CHANGES_HEADER *pChanges;    // shared dirty-rect buffer
     ULONG   ChangesSize;                // shared buffer size in bytes
@@ -68,9 +87,12 @@ typedef struct _PDEV
 /* ---- prototypes ---- */
 
 BOOL bInitPDEV(PPDEV, PDEVMODEW, GDIINFO *, DEVINFO *);
-VOID vDisablePDEV(PPDEV);
 VOID MirrorLogChange(PPDEV, CONST RECTL *);
 
 #define DLL_NAME                L"mirror"     // Name of the DLL in UNICODE
 #define STANDARD_DEBUG_PREFIX   "MIRROR: "    // All debug output is prefixed
 #define ALLOC_TAG               'oDDM'        // Four byte tag for memory allocation
+
+/* Always hook these to be called for our surfaces (from the WDK sample). */
+#define flGlobalHooks   HOOK_FILLPATH | HOOK_STROKEPATH | HOOK_LINETO | HOOK_TEXTOUT | HOOK_BITBLT | HOOK_COPYBITS
+#define HOOKS_BMF32BPP  0

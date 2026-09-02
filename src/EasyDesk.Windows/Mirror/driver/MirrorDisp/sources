@@ -15,6 +15,6 @@ MSC_WARNING_LEVEL=/W3
 # driver.h lives in this dir
 INCLUDES=.;$(DDK_INC_PATH)
 
-SOURCES=MirrorDisp.c
+SOURCES=MirrorDisp.c screen.c
 
 TARGET_DESTINATION=retail

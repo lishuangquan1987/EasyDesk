@@ -50,6 +50,10 @@ echo Creating kernel driver service 'mirror'...
 sc stop mirror >nul 2>&1
 sc delete mirror >nul 2>&1
 sc create mirror type= kernel start= system error= ignore binPath= "%SYS%\%SYSNAME%" DisplayName= "EasyRDP Mirror Display Driver" || goto :fail
+REM Critical: the mirror miniport must load in the Video group at boot
+REM (like the WDK inf's LoadOrderGroup=Video). Without it the service
+REM stays disabled / fails with ERROR 1058.
+sc config mirror group= Video || goto :fail
 
 echo Writing display driver registration...
 reg add "HKLM\SYSTEM\CurrentControlSet\Services\mirror" /v MirrorDriver /t REG_DWORD /d 1 /f >nul
