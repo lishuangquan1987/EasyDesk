@@ -160,6 +160,7 @@ namespace EasyDesk.Windows
                         {
                             int stride = _screenWidth * 4;
                             int totalBytes = stride * _screenHeight;
+                            // 调用方（CaptureService）拥有并负责 FreeHGlobal，故必须每帧分配新缓冲
                             IntPtr buffer = Marshal.AllocHGlobal(totalBytes);
 
                             // 逐行拷贝（源 stride 可能与 width*4 不同）
