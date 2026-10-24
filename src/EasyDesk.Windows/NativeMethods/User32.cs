@@ -31,12 +31,6 @@ namespace EasyDesk.Windows.NativeMethods
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool DestroyIcon(IntPtr hIcon);
 
-        /// <summary>
-        /// 加载系统光标（IDC_*，通过 MAKEINTRESOURCE 传入整数 ID）。
-        /// 返回共享光标句柄，可用来预渲染系统标准形状。
-        /// </summary>
-        [DllImport(DllName, SetLastError = true)]
-        public static extern IntPtr LoadCursor(IntPtr hInstance, IntPtr lpCursorName);
 
         /// <summary>
         /// Draws an icon/cursor into a DC, applying its AND/XOR masks (or the alpha

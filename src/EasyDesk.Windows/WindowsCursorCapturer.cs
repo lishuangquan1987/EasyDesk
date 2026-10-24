@@ -49,43 +49,6 @@ namespace EasyDesk.Windows
         private byte[] _dibZeroes;
         private bool _dibReady;
 
-        // ── 系统标准光标形状目录（IDC_* 预渲染，句柄 → 形状）──
-        // 系统光标句柄是进程间共享的：命中后无需 GetIconInfo + DrawIconEx，
-        // 既覆盖全部标准形状（箭头/IBeam/等待/十字/双向箭头/移动/禁止/手型…），
-        // 也让拖动改变形状时的轮询更轻。
-        private readonly Dictionary<IntPtr, CachedShape> _systemShapes =
-            new Dictionary<IntPtr, CachedShape>();
-        private bool _systemShapesLoaded;
-
-        /// <summary>预渲染的系统光标形状。</summary>
-        private sealed class CachedShape
-        {
-            public int Width;
-            public int Height;
-            public int HotX;
-            public int HotY;
-            public byte[] ImageData;
-        }
-
-        /// <summary>系统标准光标 ID（winuser.h IDC_*），用于预渲染目录。</summary>
-        private static readonly int[] SystemCursorIds = new int[]
-        {
-            32512, // IDC_ARROW
-            32513, // IDC_IBEAM
-            32514, // IDC_WAIT
-            32515, // IDC_CROSS
-            32516, // IDC_UPARROW
-            32642, // IDC_SIZENWSE
-            32643, // IDC_SIZENESW
-            32644, // IDC_SIZEWE
-            32645, // IDC_SIZENS
-            32646, // IDC_SIZEALL
-            32648, // IDC_NO
-            32649, // IDC_HAND
-            32650, // IDC_APPSTARTING
-            32651  // IDC_HELP
-        };
-
         /// <summary>
         /// 把 GetIconInfo 返回的掩码位图全部释放（调用方职责）。
         /// </summary>
@@ -149,20 +112,6 @@ namespace EasyDesk.Windows
 
             lock (_cacheLock)
             {
-                // 系统标准形状：命中预渲染目录（覆盖全部 IDC_*，不依赖句柄是否已缓存）
-                EnsureSystemShapes();
-                CachedShape systemShape;
-                if (_systemShapes.TryGetValue(ci.hCursor, out systemShape))
-                {
-                    return new CursorInfo
-                    {
-                        X = x, Y = y,
-                        HotspotX = systemShape.HotX, HotspotY = systemShape.HotY,
-                        Width = systemShape.Width, Height = systemShape.Height,
-                        ImageData = systemShape.ImageData
-                    };
-                }
-
                 // 缓存命中：光标句柄未变，直接复用形状（仅位置更新）。
                 // 这是 60Hz 轮询的热路径 —— 一次 GetCursorInfo API 即返回。
                 if (ci.hCursor == _cachedHandle && _cachedImageData != null)
@@ -532,54 +481,6 @@ namespace EasyDesk.Windows
             {
                 andBits = null;
                 return false;
-            }
-        }
-
-        /// <summary>
-        /// 预渲染系统标准光标形状（IDC_*）：首次调用时一次性构建目录。
-        /// 句柄命中后直接复用，覆盖箭头/IBeam/等待/十字/双向箭头/移动/禁止/手型等。
-        /// </summary>
-        private void EnsureSystemShapes()
-        {
-            if (_systemShapesLoaded)
-                return;
-            _systemShapesLoaded = true;
-
-            foreach (int id in SystemCursorIds)
-            {
-                try
-                {
-                    IntPtr hCursor = User32.LoadCursor(IntPtr.Zero, (IntPtr)id);
-                    if (hCursor == IntPtr.Zero)
-                        continue;
-
-                    ICONINFO ii;
-                    if (!User32.GetIconInfo(hCursor, out ii))
-                        continue;
-                    try
-                    {
-                        byte[] data;
-                        int w;
-                        int h;
-                        if (!TryRenderCursorShape(hCursor, ii, out data, out w, out h))
-                            continue;
-                        var shape = new CachedShape();
-                        shape.Width = w;
-                        shape.Height = h;
-                        shape.HotX = ii.xHotspot;
-                        shape.HotY = ii.yHotspot;
-                        shape.ImageData = data;
-                        _systemShapes[hCursor] = shape;
-                    }
-                    finally
-                    {
-                        DestroyIconBitmaps(ii);
-                    }
-                }
-                catch (Exception)
-                {
-                    // 单个系统光标失败不影响其它形状
-                }
             }
         }
 
