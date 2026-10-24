@@ -25,6 +25,11 @@ namespace EasyDesk.Windows
         private SharpDX.DXGI.Factory _factory;
         private int _screenWidth;
         private int _screenHeight;
+        // 当前 duplication 对应的输出在虚拟桌面中的原点（副屏可能为负坐标）
+        private int _outputLeft;
+        private int _outputTop;
+        private int _outputIndex;
+        private int _adapterIndex;
         private bool _disposed;
         // Reinitialize 失败后置 true，下一次 CaptureScreen 自动重试，避免永久静默返回空帧
         private bool _needsInit;
@@ -68,6 +73,10 @@ namespace EasyDesk.Windows
                 var bounds = _outputDesc.DesktopBounds;
                 _screenWidth = bounds.Right - bounds.Left;
                 _screenHeight = bounds.Bottom - bounds.Top;
+                _outputLeft = bounds.Left;
+                _outputTop = bounds.Top;
+                _outputIndex = outputIndex;
+                _adapterIndex = adapterIndex;
 
                 // 创建输出复制接口
                 output1 = output.QueryInterface<Output1>();
@@ -123,6 +132,23 @@ namespace EasyDesk.Windows
         {
             if (_disposed)
                 return CreateEmptyFrame();
+
+            // 多显示器：按 TargetDisplay 选择对应的 DXGI 输出（0=主屏，1..n=副屏，语义与 BitBlt 路径一致）。
+            // -1（整个虚拟桌面）无法由单个输出覆盖，沿用当前输出（默认主屏）。
+            try
+            {
+                if (options != null && options.TargetDisplay >= 0)
+                {
+                    int dx, dy, dw, dh;
+                    WindowsScreenCapturer.GetCaptureBounds(options.TargetDisplay, out dx, out dy, out dw, out dh);
+                    EnsureOutputForRect(dx, dy, dw, dh);
+                }
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                // 目标显示器不存在（热插拔/索引过期）：返回空帧，由上层捕获逻辑跳过
+                return CreateEmptyFrame();
+            }
 
             // 上次 Reinitialize 失败后自愈：每次调用尝试重建，而不是永久静默返回空帧
             if (_needsInit || _duplication == null || _device == null)
@@ -219,21 +245,31 @@ namespace EasyDesk.Windows
 
         /// <summary>
         /// 捕获指定区域（通过 DXGI 捕获全帧后裁剪实现）。
+        /// 坐标为虚拟桌面绝对坐标：自动选择包含该区域的输出并按输出原点换算。
         /// </summary>
         public ScreenFrame CaptureRegion(int x, int y, int width, int height)
         {
+            if (width <= 0 || height <= 0)
+                throw new ArgumentOutOfRangeException("width");
+            // 先切到包含目标矩形的输出；找不到（负坐标副屏之外）直接抛越界
+            EnsureOutputForRect(x, y, width, height);
+
             var full = CaptureScreen();
             if (full.Scan0 == IntPtr.Zero)
                 return full;
 
+            // 输出局部坐标：虚拟桌面绝对坐标减去当前输出原点
+            int localX = x - _outputLeft;
+            int localY = y - _outputTop;
+
             // 越界校验：负坐标/超界会让 CopyMemory 直读 full.Scan0 之外的内存 → AV。
-            if (x < 0 || y < 0 || width <= 0 || height <= 0
-                || x > full.Width - width || y > full.Height - height)
+            if (localX < 0 || localY < 0
+                || localX > full.Width - width || localY > full.Height - height)
             {
                 Marshal.FreeHGlobal(full.Scan0);
                 throw new ArgumentOutOfRangeException(
-                    string.Format("CaptureRegion out of bounds: x={0} y={1} w={2} h={3} (screen {4}x{5})",
-                        x, y, width, height, full.Width, full.Height));
+                    string.Format("CaptureRegion out of bounds: x={0} y={1} w={2} h={3} (output {4}x{5} at {6},{7})",
+                        x, y, width, height, full.Width, full.Height, _outputLeft, _outputTop));
             }
 
             IntPtr regionBuffer = IntPtr.Zero;
@@ -246,7 +282,7 @@ namespace EasyDesk.Windows
 
                 for (int row = 0; row < height; row++)
                 {
-                    IntPtr srcPtr = new IntPtr(full.Scan0.ToInt64() + ((y + row) * srcStride) + x * 4);
+                    IntPtr srcPtr = new IntPtr(full.Scan0.ToInt64() + ((localY + row) * srcStride) + localX * 4);
                     IntPtr dstPtr = new IntPtr(regionBuffer.ToInt64() + row * dstStride);
                     CopyMemory(dstPtr, srcPtr, dstStride);
                 }
@@ -269,6 +305,113 @@ namespace EasyDesk.Windows
                 Marshal.FreeHGlobal(full.Scan0);
                 return CreateEmptyFrame();
             }
+        }
+
+        /// <summary>
+        /// 确保当前 Desktop Duplication 对应包含指定虚拟桌面矩形的输出。
+        /// 多显示器下每个输出有独立的 duplication 对象，跨屏时重建。
+        /// </summary>
+        private void EnsureOutputForRect(int x, int y, int width, int height)
+        {
+            if (!_needsInit && _duplication != null && ContainsRect(x, y, width, height))
+                return;
+
+            int adapterIndex;
+            int outputIndex;
+            if (!FindOutputForRect(x, y, width, height, out adapterIndex, out outputIndex))
+                throw new ArgumentOutOfRangeException("x",
+                    string.Format("No display output contains rect x={0} y={1} w={2} h={3}", x, y, width, height));
+
+            if (!_needsInit && _duplication != null
+                && adapterIndex == _adapterIndex && outputIndex == _outputIndex)
+                return;
+
+            Initialize(adapterIndex, outputIndex);
+            if (_duplication == null)
+                throw new InvalidOperationException("DXGI output duplication initialization failed");
+        }
+
+        /// <summary>当前输出是否完整包含指定虚拟桌面矩形。</summary>
+        private bool ContainsRect(int x, int y, int width, int height)
+        {
+            return x >= _outputLeft && y >= _outputTop
+                && x + width <= _outputLeft + _screenWidth
+                && y + height <= _outputTop + _screenHeight;
+        }
+
+        /// <summary>
+        /// 枚举适配器与输出，找出完整包含指定矩形的输出。
+        /// 不依赖特定 SharpDX 版本的计数 API：索引越界即停止（输出数量有限）。
+        /// </summary>
+        private bool FindOutputForRect(int x, int y, int width, int height,
+            out int adapterIndex, out int outputIndex)
+        {
+            adapterIndex = 0;
+            outputIndex = 0;
+            SharpDX.DXGI.Factory factory = _factory;
+            if (factory == null)
+            {
+                // SharpDX 4 的 Factory 只能由 DXGI 设备父对象取得（无公开无参构造）：
+                // 首次调用时先初始化默认输出（主屏），再枚举所有输出。
+                try { Initialize(); }
+                catch { return false; }
+                factory = _factory;
+            }
+            if (factory == null)
+                return false;
+
+            // 多 GPU 笔记本：显示器可能挂在非 0 号适配器上
+            for (int a = 0; a < 4; a++)
+            {
+                SharpDX.DXGI.Adapter adapter = null;
+                try
+                {
+                    adapter = factory.GetAdapter(a);
+                }
+                catch
+                {
+                    break;
+                }
+                bool found = false;
+                try
+                {
+                    for (int i = 0; i < 16; i++)
+                    {
+                        SharpDX.DXGI.Output output = null;
+                        try
+                        {
+                            output = adapter.GetOutput(i);
+                        }
+                        catch
+                        {
+                            break;
+                        }
+                        try
+                        {
+                            var r = output.Description.DesktopBounds;
+                            if (x >= r.Left && y >= r.Top
+                                && x + width <= r.Right && y + height <= r.Bottom)
+                            {
+                                adapterIndex = a;
+                                outputIndex = i;
+                                found = true;
+                                break;
+                            }
+                        }
+                        finally
+                        {
+                            output.Dispose();
+                        }
+                    }
+                }
+                finally
+                {
+                    adapter.Dispose();
+                }
+                if (found)
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>

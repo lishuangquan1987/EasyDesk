@@ -372,7 +372,12 @@ namespace EasyDesk.Windows
             return bounds.ToArray();
         }
 
-        private static void GetCaptureBounds(
+        /// <summary>
+        /// 解析 TargetDisplay 对应的显示器矩形（虚拟桌面坐标）。
+        /// -1 = 整个虚拟桌面；0 = 主屏；1..n = 按枚举顺序的第 n 个副屏。
+        /// 公开给其他采集实现（DXGI）复用同一套显示器索引语义。
+        /// </summary>
+        public static void GetCaptureBounds(
             int targetDisplay, out int x, out int y, out int width, out int height)
         {
             if (targetDisplay < 0)
