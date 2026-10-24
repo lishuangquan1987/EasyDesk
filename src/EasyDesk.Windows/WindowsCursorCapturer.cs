@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using EasyDesk.Core;
 using EasyDesk.Core.Models;
@@ -47,6 +48,43 @@ namespace EasyDesk.Windows
         private int _dibH;
         private byte[] _dibZeroes;
         private bool _dibReady;
+
+        // ── 系统标准光标形状目录（IDC_* 预渲染，句柄 → 形状）──
+        // 系统光标句柄是进程间共享的：命中后无需 GetIconInfo + DrawIconEx，
+        // 既覆盖全部标准形状（箭头/IBeam/等待/十字/双向箭头/移动/禁止/手型…），
+        // 也让拖动改变形状时的轮询更轻。
+        private readonly Dictionary<IntPtr, CachedShape> _systemShapes =
+            new Dictionary<IntPtr, CachedShape>();
+        private bool _systemShapesLoaded;
+
+        /// <summary>预渲染的系统光标形状。</summary>
+        private sealed class CachedShape
+        {
+            public int Width;
+            public int Height;
+            public int HotX;
+            public int HotY;
+            public byte[] ImageData;
+        }
+
+        /// <summary>系统标准光标 ID（winuser.h IDC_*），用于预渲染目录。</summary>
+        private static readonly int[] SystemCursorIds = new int[]
+        {
+            32512, // IDC_ARROW
+            32513, // IDC_IBEAM
+            32514, // IDC_WAIT
+            32515, // IDC_CROSS
+            32516, // IDC_UPARROW
+            32642, // IDC_SIZENWSE
+            32643, // IDC_SIZENESW
+            32644, // IDC_SIZEWE
+            32645, // IDC_SIZENS
+            32646, // IDC_SIZEALL
+            32648, // IDC_NO
+            32649, // IDC_HAND
+            32650, // IDC_APPSTARTING
+            32651  // IDC_HELP
+        };
 
         /// <summary>
         /// 把 GetIconInfo 返回的掩码位图全部释放（调用方职责）。
@@ -111,6 +149,20 @@ namespace EasyDesk.Windows
 
             lock (_cacheLock)
             {
+                // 系统标准形状：命中预渲染目录（覆盖全部 IDC_*，不依赖句柄是否已缓存）
+                EnsureSystemShapes();
+                CachedShape systemShape;
+                if (_systemShapes.TryGetValue(ci.hCursor, out systemShape))
+                {
+                    return new CursorInfo
+                    {
+                        X = x, Y = y,
+                        HotspotX = systemShape.HotX, HotspotY = systemShape.HotY,
+                        Width = systemShape.Width, Height = systemShape.Height,
+                        ImageData = systemShape.ImageData
+                    };
+                }
+
                 // 缓存命中：光标句柄未变，直接复用形状（仅位置更新）。
                 // 这是 60Hz 轮询的热路径 —— 一次 GetCursorInfo API 即返回。
                 if (ci.hCursor == _cachedHandle && _cachedImageData != null)
@@ -236,34 +288,138 @@ namespace EasyDesk.Windows
                     byte[] rendered = new byte[dibBytes];
                     Marshal.Copy(_dibBuffer, rendered, 0, dibBytes);
 
-                    // 合成 [AND 1bpp | XOR BGRA]：alpha==0 → AND=1（透明）
+                    // 合成 [AND 1bpp | XOR BGRA]
                     int andStride = ((width + 15) / 16) * 2;
                     int xorStride = width * 4;
                     imageData = new byte[(andStride + xorStride) * height];
                     int xorBase = andStride * height;
 
-                    for (int row = 0; row < height; row++)
+                    // 某些光标（Win11 的 IBeam/十字等）虽然是彩色位图，但 GDI 渲染到 32bpp DIB
+                    // 后 alpha 恒为 0（不做 alpha 合成）。此时按 alpha 判定会把整只光标判成透明，
+                    // 客户端只能沿用旧形状。检测到 alpha 全 0 时回退到 hbmMask 判定。
+                    bool alphaAllZero = true;
+                    for (int i = 3; i < rendered.Length; i += 4)
                     {
-                        int srcRow = row * width * 4;
-                        int dstRow = xorBase + row * xorStride;
-                        int andRow = row * andStride;
-                        for (int col = 0; col < width; col++)
+                        if (rendered[i] != 0) { alphaAllZero = false; break; }
+                    }
+
+                    if (hasColor && !alphaAllZero)
+                    {
+                        // 彩色（含 alpha）光标：DrawIconEx 已按光标 alpha 合成，alpha==0 即透明
+                        for (int row = 0; row < height; row++)
                         {
-                            int s = srcRow + col * 4;
-                            byte b = rendered[s];
-                            byte g = rendered[s + 1];
-                            byte r = rendered[s + 2];
-                            byte a = rendered[s + 3];
-                            int d = dstRow + col * 4;
-                            imageData[d] = b;
-                            imageData[d + 1] = g;
-                            imageData[d + 2] = r;
-                            imageData[d + 3] = a;
-                            if (a == 0)
+                            int srcRow = row * width * 4;
+                            int dstRow = xorBase + row * xorStride;
+                            int andRow = row * andStride;
+                            for (int col = 0; col < width; col++)
                             {
-                                int byteIndex = col / 8;
-                                int bitInByte = 7 - (col % 8);
-                                imageData[andRow + byteIndex] |= (byte)(1 << bitInByte);
+                                int s = srcRow + col * 4;
+                                byte b = rendered[s];
+                                byte g = rendered[s + 1];
+                                byte r = rendered[s + 2];
+                                byte a = rendered[s + 3];
+                                int d = dstRow + col * 4;
+                                imageData[d] = b;
+                                imageData[d + 1] = g;
+                                imageData[d + 2] = r;
+                                imageData[d + 3] = a;
+                                if (a == 0)
+                                {
+                                    imageData[andRow + col / 8] |= (byte)(1 << (7 - (col % 8)));
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // 彩色但 DrawIconEx 未写 alpha（Win11 的 IBeam/十字等）：优先直接读
+                        // hbmColor 的 32bpp 像素（含 alpha），这比掩码更精确（保留抗锯齿边缘）。
+                        byte[] colorPixels;
+                        if (hasColor
+                            && TryReadColorPixels(hdc, ii.hbmColor, width, height, out colorPixels))
+                        {
+                            bool colorHasAlpha = false;
+                            for (int i = 3; i < colorPixels.Length; i += 4)
+                            {
+                                if (colorPixels[i] != 0) { colorHasAlpha = true; break; }
+                            }
+                            if (colorHasAlpha)
+                            {
+                                for (int row = 0; row < height; row++)
+                                {
+                                    int srcRow = row * width * 4;
+                                    int dstRow = xorBase + row * xorStride;
+                                    int andRow = row * andStride;
+                                    for (int col = 0; col < width; col++)
+                                    {
+                                        int s2 = srcRow + col * 4;
+                                        int d2 = dstRow + col * 4;
+                                        byte a = colorPixels[s2 + 3];
+                                        imageData[d2] = colorPixels[s2];
+                                        imageData[d2 + 1] = colorPixels[s2 + 1];
+                                        imageData[d2 + 2] = colorPixels[s2 + 2];
+                                        imageData[d2 + 3] = a;
+                                        if (a == 0)
+                                        {
+                                            imageData[andRow + col / 8] |= (byte)(1 << (7 - (col % 8)));
+                                        }
+                                    }
+                                }
+                                return true;
+                            }
+                        }
+
+                        // 单色（经典）光标，或彩色但像素也不带 alpha：
+                        // DrawIconEx 走 AND/XOR 光栅操作，不写 alpha。此时必须用 hbmMask
+                        // 的 AND 段判定透明像素（1=透明），颜色取渲染结果、alpha 固定 255。
+                        byte[] andBits;
+                        bool maskOk = TryReadAndMask(hdc, ii.hbmMask, width, height, hasColor, out andBits);
+                        if (!maskOk && !hasColor)
+                            return false; // 单色且掩码不可读：无法判定透明度，交给上层保留旧形状
+
+                        // alpha 光标（部分 Win10/11 主题的 IBeam、十字等）的 hbmMask 全为 1
+                        // （表示透明度完全由 alpha 表达），而 GDI 渲染又不写 alpha。
+                        // 此时掩码不可用，退化为"非黑像素不透明"，至少保住光标主体形状。
+                        bool maskAllTransparent = maskOk;
+                        if (maskOk)
+                        {
+                            for (int i = 0; i < andBits.Length; i++)
+                            {
+                                if (andBits[i] != 0xFF) { maskAllTransparent = false; break; }
+                            }
+                        }
+
+                        for (int row = 0; row < height; row++)
+                        {
+                            int srcRow = row * width * 4;
+                            int dstRow = xorBase + row * xorStride;
+                            int andRow = row * andStride;
+                            for (int col = 0; col < width; col++)
+                            {
+                                int s = srcRow + col * 4;
+                                int d = dstRow + col * 4;
+                                imageData[d] = rendered[s];
+                                imageData[d + 1] = rendered[s + 1];
+                                imageData[d + 2] = rendered[s + 2];
+                                imageData[d + 3] = 255;
+                                bool transparent;
+                                if (maskOk && !maskAllTransparent)
+                                {
+                                    transparent = (andBits[andRow + col / 8] & (1 << (7 - (col % 8)))) != 0;
+                                }
+                                else if (maskAllTransparent)
+                                {
+                                    // 兜底：黑色视为透明（alpha 光标的黑边会丢，但主体形状可见）
+                                    transparent = rendered[s] == 0 && rendered[s + 1] == 0 && rendered[s + 2] == 0;
+                                }
+                                else
+                                {
+                                    transparent = false; // 掩码不可读（彩色）：全部不透明，保证可见
+                                }
+                                if (transparent)
+                                {
+                                    imageData[andRow + col / 8] |= (byte)(1 << (7 - (col % 8)));
+                                }
                             }
                         }
                     }
@@ -280,6 +436,150 @@ namespace EasyDesk.Windows
                 width = 0;
                 height = 0;
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// 读取光标 hbmColor 的 32bpp 像素（BGRA，top-down）。DDB 的 alpha 在部分驱动上
+        /// 不可靠，但 32bpp DIB 光标（Win10/11 默认主题）能正确返回 alpha。
+        /// </summary>
+        private static bool TryReadColorPixels(IntPtr hdc, IntPtr hbmColor,
+            int width, int height, out byte[] bgra)
+        {
+            bgra = null;
+            if (hbmColor == IntPtr.Zero || width <= 0 || height <= 0)
+                return false;
+
+            try
+            {
+                var bmi = new BITMAPINFO();
+                bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                bmi.bmiHeader.biWidth = width;
+                bmi.bmiHeader.biHeight = height; // 正数 = bottom-up
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 32;
+                bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
+
+                int stride = width * 4;
+                byte[] buffer = new byte[stride * height];
+                int lines = Gdi32.GetDIBits(hdc, hbmColor, 0, (uint)height,
+                    buffer, ref bmi, Win32Constants.DIB_RGB_COLORS);
+                if (lines == 0)
+                    return false;
+
+                bgra = new byte[stride * height];
+                for (int row = 0; row < height; row++)
+                {
+                    Buffer.BlockCopy(buffer, (height - 1 - row) * stride, bgra, row * stride, stride);
+                }
+                return true;
+            }
+            catch (Exception)
+            {
+                bgra = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 读取光标 hbmMask 的 AND 段，逐位重排为 [宽度按 2 字节对齐] 的 top-down 位图（1=透明）。
+        /// - 单色光标（hasColor=false）：hbmMask 双倍高，上半是 AND、下半是 XOR；
+        /// - 彩色光标（hasColor=true）：hbmMask 单倍高，整段就是 AND。
+        /// </summary>
+        private static bool TryReadAndMask(IntPtr hdc, IntPtr hbmMask,
+            int width, int height, bool hasColor, out byte[] andBits)
+        {
+            andBits = null;
+            if (hbmMask == IntPtr.Zero || width <= 0 || height <= 0)
+                return false;
+
+            try
+            {
+                var bmi = new BITMAPINFO();
+                bmi.bmiHeader.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+                int maskHeight = hasColor ? height : height * 2;
+                bmi.bmiHeader.biWidth = width;
+                bmi.bmiHeader.biHeight = maskHeight; // 正数 = bottom-up
+                bmi.bmiHeader.biPlanes = 1;
+                bmi.bmiHeader.biBitCount = 1;
+                bmi.bmiHeader.biCompression = Win32Constants.BI_RGB;
+
+                int dibStride = ((width + 31) / 32) * 4;
+                byte[] buffer = new byte[dibStride * maskHeight];
+                int lines = Gdi32.GetDIBits(hdc, hbmMask, 0, (uint)maskHeight,
+                    buffer, ref bmi, Win32Constants.DIB_RGB_COLORS);
+                if (lines == 0)
+                    return false;
+
+                int andStride = ((width + 15) / 16) * 2;
+                andBits = new byte[andStride * height];
+                // bottom-up：buffer 的行 0 是图像最底行；top-down 第 r 行对应
+                // buffer 的第 (maskHeight - 1 - r) 行（即 AND 段）
+                for (int row = 0; row < height; row++)
+                {
+                    int srcRow = (maskHeight - 1 - row) * dibStride;
+                    int dstRow = row * andStride;
+                    for (int col = 0; col < width; col++)
+                    {
+                        bool set = (buffer[srcRow + col / 8] & (1 << (7 - (col % 8)))) != 0;
+                        if (set)
+                            andBits[dstRow + col / 8] |= (byte)(1 << (7 - (col % 8)));
+                    }
+                }
+                return true;
+            }
+            catch (Exception)
+            {
+                andBits = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 预渲染系统标准光标形状（IDC_*）：首次调用时一次性构建目录。
+        /// 句柄命中后直接复用，覆盖箭头/IBeam/等待/十字/双向箭头/移动/禁止/手型等。
+        /// </summary>
+        private void EnsureSystemShapes()
+        {
+            if (_systemShapesLoaded)
+                return;
+            _systemShapesLoaded = true;
+
+            foreach (int id in SystemCursorIds)
+            {
+                try
+                {
+                    IntPtr hCursor = User32.LoadCursor(IntPtr.Zero, (IntPtr)id);
+                    if (hCursor == IntPtr.Zero)
+                        continue;
+
+                    ICONINFO ii;
+                    if (!User32.GetIconInfo(hCursor, out ii))
+                        continue;
+                    try
+                    {
+                        byte[] data;
+                        int w;
+                        int h;
+                        if (!TryRenderCursorShape(hCursor, ii, out data, out w, out h))
+                            continue;
+                        var shape = new CachedShape();
+                        shape.Width = w;
+                        shape.Height = h;
+                        shape.HotX = ii.xHotspot;
+                        shape.HotY = ii.yHotspot;
+                        shape.ImageData = data;
+                        _systemShapes[hCursor] = shape;
+                    }
+                    finally
+                    {
+                        DestroyIconBitmaps(ii);
+                    }
+                }
+                catch (Exception)
+                {
+                    // 单个系统光标失败不影响其它形状
+                }
             }
         }
 
