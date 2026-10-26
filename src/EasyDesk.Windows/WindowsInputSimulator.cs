@@ -65,8 +65,10 @@ namespace EasyDesk.Windows
                 int primaryY;
                 GetPrimaryOrigin(out primaryX, out primaryY);
                 // 用 (范围-1) 做除数让最右/最下像素可达（dx=65535）
-                input.mkhi.mi.dx = ((primaryX + x - virtualX) * 65535) / Math.Max(virtualW - 1, 1);
-                input.mkhi.mi.dy = ((primaryY + y - virtualY) * 65535) / Math.Max(virtualH - 1, 1);
+                // 四舍五入而不是截断：截断会让光标恒定向左/上偏 ~0.5px，
+                // 拖动 1px 级别的细线时表现为整体不精准
+                input.mkhi.mi.dx = (int)Math.Round((primaryX + x - virtualX) * 65535.0 / Math.Max(virtualW - 1, 1));
+                input.mkhi.mi.dy = (int)Math.Round((primaryY + y - virtualY) * 65535.0 / Math.Max(virtualH - 1, 1));
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.Absolute;
                 input.mkhi.mi.dwFlags |= (uint)MouseEventFlags.VirtualDesk;
             }
